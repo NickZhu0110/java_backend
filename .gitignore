@@ -1,0 +1,5 @@
+.DS_Store
+.dev-pids/
+logs/
+python-worker/.venv/
+python-worker/__pycache__/

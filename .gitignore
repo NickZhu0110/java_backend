@@ -1,5 +1,77 @@
+# macOS
 .DS_Store
-.dev-pids/
-logs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Java / Maven
+cac-backend/target/
+target/
+*.class
+*.jar
+*.war
+
+# Python
 python-worker/.venv/
-python-worker/__pycache__/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Qt / CMake
+qt-cac-app/build/
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.user
+*.pro.user
+.qtc_clangd/
+compile_commands.json
+
+# Logs
+*.log
+logs/
+.dev-pids/
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+config.ini
+*.local.ini
+application-prod.yaml
+application-local.yaml
+
+# Medical data / runtime files
+data/
+datasets/
+dicom/
+DICOM/
+outputs/
+results/
+reports/
+masks/
+storage/
+
+# Models
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+
+# PostgreSQL / DB dumps
+*.sql.gz
+*.dump
+*.backup
+
+# Redis / Kafka local data
+redis-data/
+kafka-logs/
+zookeeper-data/

@@ -75,3 +75,6 @@ storage/
 redis-data/
 kafka-logs/
 zookeeper-data/
+
+# Redis snapshots
+*.rdb

@@ -82,3 +82,7 @@ CMakeLists.txt.user*
 .uic/
 /build*/
 /.qtcreator/
+
+# Local downloaded job/case cache. Contains CT volumes, masks, and metadata
+# produced by the desktop client; do not commit patient/case data.
+/cac_platform/cache/

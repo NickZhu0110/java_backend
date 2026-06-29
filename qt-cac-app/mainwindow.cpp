@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "BackendClient.h"
+#include "cache/JobFileCacheManager.h"
+#include "io/BackendFileClient.h"
 #include "viewer/CTViewerWidget.h"
 #include "JobWebSocketClient.h"
 #include "ServerSettingsDialog.h"
@@ -8,6 +10,10 @@
 #include <QFileDialog>
 #include <QBoxLayout>
 #include <QCheckBox>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLayout>
@@ -19,6 +25,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , m_backendClient(new BackendClient(this))
+    , m_backendFileClient(new BackendFileClient(this))
     , m_webSocketClient(new JobWebSocketClient(this))
     , m_ctViewerWidget(nullptr)
     , m_currentJobId(-1)
@@ -28,6 +35,7 @@ MainWindow::MainWindow(QWidget *parent)
     embedCtViewer();
     setupInitialState();
     connectSignals();
+    loadMostRecentCaseCacheIfAvailable();
 }
 
 MainWindow::~MainWindow()
@@ -123,6 +131,80 @@ void MainWindow::connectSignals()
         appendLog(message);
     });
 
+    connect(m_backendFileClient, &BackendFileClient::aiMaskDownloaded,
+            this, [this](qint64 jobId, const QString &destinationPath, qint64 bytesWritten) {
+        appendLog(QStringLiteral("Saved AI mask to local cache: %1").arg(destinationPath));
+        appendLog(QStringLiteral("Downloaded AI mask bytes: %1").arg(bytesWritten));
+
+        if (m_ctViewerWidget) {
+            m_ctViewerWidget->loadMaskFromLocalPath(destinationPath);
+        }
+
+        JobFileCacheManager cacheManager;
+        const QString caseKey = m_currentCaseKey.isEmpty()
+            ? cacheManager.caseKeyFromInputPath(m_currentJobInputPath)
+            : m_currentCaseKey;
+
+        QJsonObject metadata;
+        metadata.insert(QStringLiteral("jobId"), QString::number(jobId));
+        metadata.insert(QStringLiteral("caseKey"), caseKey);
+        metadata.insert(QStringLiteral("originalInputPath"), m_currentJobInputPath);
+        metadata.insert(QStringLiteral("serverResultJsonPath"), m_currentServerResultJsonPath);
+        metadata.insert(QStringLiteral("serverAiMaskPath"), m_currentServerAiMaskPath);
+        metadata.insert(QStringLiteral("localCaseCacheDir"), cacheManager.getCaseCacheDir(caseKey));
+        metadata.insert(QStringLiteral("localAiMaskPath"), destinationPath);
+        metadata.insert(QStringLiteral("downloadedBytes"), QString::number(bytesWritten));
+        metadata.insert(QStringLiteral("downloadedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+        cacheManager.writeJobMetadata(jobId, metadata);
+        cacheManager.writeCaseMetadata(caseKey, metadata);
+        tryLoadCurrentCaseFromCache();
+    });
+
+    connect(m_backendFileClient, &BackendFileClient::aiMaskDownloadFailed,
+            this, [this](qint64 jobId, const QString &message, int httpStatus) {
+        appendLog(QStringLiteral("AI mask download failed for job %1, HTTP status %2: %3")
+                      .arg(jobId)
+                      .arg(httpStatus)
+                      .arg(message));
+        appendLog(QStringLiteral("Synthetic viewer fallback remains active."));
+    });
+
+    connect(m_backendFileClient, &BackendFileClient::inputVolumeDownloaded,
+            this, [this](qint64 jobId, const QString &destinationPath, qint64 bytesWritten) {
+        appendLog(QStringLiteral("Saved input volume to local cache: %1").arg(destinationPath));
+        appendLog(QStringLiteral("Downloaded input volume bytes: %1").arg(bytesWritten));
+        appendLog(QStringLiteral("Input volume artifact is cached; attempting case load when mask is also available."));
+
+        JobFileCacheManager cacheManager;
+        const QString caseKey = m_currentCaseKey.isEmpty()
+            ? cacheManager.caseKeyFromInputPath(m_currentJobInputPath)
+            : m_currentCaseKey;
+        QJsonObject metadata;
+        metadata.insert(QStringLiteral("jobId"), QString::number(jobId));
+        metadata.insert(QStringLiteral("caseKey"), caseKey);
+        metadata.insert(QStringLiteral("serverInputPath"), m_currentJobInputPath);
+        metadata.insert(QStringLiteral("localInputVolumePath"), destinationPath);
+        metadata.insert(QStringLiteral("inputDownloadStatus"), QStringLiteral("downloaded"));
+        metadata.insert(QStringLiteral("downloadedBytes"), QString::number(bytesWritten));
+        metadata.insert(QStringLiteral("downloadedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+        metadata.insert(QStringLiteral("note"),
+                        QStringLiteral("Current compatibility mode downloads server-side input volume. Temporary SimpleITK preprocessing is isolated behind CaseVolumeLoader."));
+        cacheManager.writeCaseMetadata(caseKey, metadata);
+
+        if (m_ctViewerWidget) {
+            m_ctViewerWidget->loadVolumeFromLocalPath(destinationPath);
+        }
+        tryLoadCurrentCaseFromCache();
+    });
+
+    connect(m_backendFileClient, &BackendFileClient::inputVolumeDownloadFailed,
+            this, [this](qint64 jobId, const QString &message, int httpStatus) {
+        appendLog(QStringLiteral("Input volume download failed for job %1, HTTP status %2: %3")
+                      .arg(jobId)
+                      .arg(httpStatus)
+                      .arg(message));
+        appendLog(QStringLiteral("Real CT display remains blocked; synthetic viewer fallback remains active."));
+    });
 }
 
 void MainWindow::appendLog(const QString &message)
@@ -163,8 +245,10 @@ void MainWindow::submitJob()
     }
 
     QJsonObject payload;
+    m_currentJobInputPath = ui->inputPathLineEdit->text().trimmed();
+    prepareCaseCacheForInput(m_currentJobInputPath);
     payload.insert(QStringLiteral("modelName"), QStringLiteral("SEGMENT-CACS"));
-    payload.insert(QStringLiteral("inputPath"), ui->inputPathLineEdit->text().trimmed());
+    payload.insert(QStringLiteral("inputPath"), m_currentJobInputPath);
     payload.insert(QStringLiteral("outputPath"), ui->outputPathLineEdit->text().trimmed());
     payload.insert(QStringLiteral("fileType"), ui->fileTypeComboBox->currentText());
     payload.insert(QStringLiteral("device"), selectedDeviceValue());
@@ -196,6 +280,10 @@ void MainWindow::submitJob()
 void MainWindow::resetForm()
 {
     m_currentJobId = -1;
+    m_currentJobInputPath.clear();
+    m_currentCaseKey.clear();
+    m_currentServerResultJsonPath.clear();
+    m_currentServerAiMaskPath.clear();
     ui->segmentcacsSrcLineEdit->clear();
     ui->modelLineEdit->clear();
     ui->inputPathLineEdit->clear();
@@ -253,6 +341,10 @@ void MainWindow::browseDirectory(QLineEdit *lineEdit)
     const QString directory = QFileDialog::getExistingDirectory(this, QStringLiteral("Select Directory"), lineEdit->text());
     if (!directory.isEmpty()) {
         lineEdit->setText(directory);
+        if (lineEdit == ui->inputPathLineEdit) {
+            m_currentJobInputPath = directory;
+            prepareCaseCacheForInput(directory);
+        }
     }
 }
 
@@ -261,6 +353,10 @@ void MainWindow::browseFile(QLineEdit *lineEdit, const QString &filter)
     const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("Select File"), lineEdit->text(), filter);
     if (!file.isEmpty()) {
         lineEdit->setText(file);
+        if (lineEdit == ui->inputPathLineEdit) {
+            m_currentJobInputPath = file;
+            prepareCaseCacheForInput(file);
+        }
     }
 }
 
@@ -281,6 +377,7 @@ void MainWindow::displayResult(const QJsonObject &result)
 
     appendLog(QStringLiteral("Result received:"));
     appendLog(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)));
+    handleJobResultFiles(result);
     updateSubmitButton();
 }
 
@@ -291,6 +388,7 @@ void MainWindow::openServerSettings()
             this, [this](bool connected, const QString &backendUrl, const QString &webSocketUrl) {
         if (connected) {
             m_backendClient->setBaseUrl(backendUrl);
+            m_backendFileClient->setBaseUrl(backendUrl);
             m_webSocketClient->setWebSocketUrl(webSocketUrl);
             setBackendConnected(true, QStringLiteral("Backend: Connected"));
             appendLog(QStringLiteral("Backend connection test successful"));
@@ -301,6 +399,7 @@ void MainWindow::openServerSettings()
     });
     if (dialog.exec() == QDialog::Accepted) {
         m_backendClient->setBaseUrl(dialog.backendUrl());
+        m_backendFileClient->setBaseUrl(dialog.backendUrl());
         m_webSocketClient->setWebSocketUrl(dialog.webSocketUrl());
         appendLog(QStringLiteral("Server settings saved"));
     }
@@ -330,4 +429,181 @@ void MainWindow::embedCtViewer()
     placeholder->hide();
     placeholder->deleteLater();
     boxLayout->insertWidget(index, m_ctViewerWidget);
+}
+
+void MainWindow::prepareCaseCacheForInput(const QString &inputPath)
+{
+    if (inputPath.trimmed().isEmpty()) {
+        return;
+    }
+
+    JobFileCacheManager cacheManager;
+    m_currentCaseKey = cacheManager.caseKeyFromInputPath(inputPath);
+    cacheManager.ensureCaseCacheDir(m_currentCaseKey);
+
+    const QString caseCacheDir = cacheManager.getCaseCacheDir(m_currentCaseKey);
+    const QString inputVolumeDir = cacheManager.localInputVolumeDir(m_currentCaseKey);
+    QFileInfo inputInfo(inputPath);
+
+    QJsonObject metadata;
+    metadata.insert(QStringLiteral("caseKey"), m_currentCaseKey);
+    metadata.insert(QStringLiteral("originalInputPath"), inputPath);
+    metadata.insert(QStringLiteral("localCaseCacheDir"), caseCacheDir);
+    metadata.insert(QStringLiteral("localInputVolumeDir"), inputVolumeDir);
+    metadata.insert(QStringLiteral("inputReferenceMode"), true);
+    metadata.insert(QStringLiteral("inputExistsOnThisMac"), inputInfo.exists());
+    metadata.insert(QStringLiteral("inputIsDir"), inputInfo.isDir());
+    metadata.insert(QStringLiteral("updatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    metadata.insert(QStringLiteral("note"),
+                    QStringLiteral("Current compatibility mode keeps the submitted input path unchanged for the remote backend. Large CT input is referenced in metadata instead of copied."));
+    cacheManager.writeCaseMetadata(m_currentCaseKey, metadata);
+
+    appendLog(QStringLiteral("Case key: %1").arg(m_currentCaseKey));
+    appendLog(QStringLiteral("Creating/reusing local case cache: %1").arg(caseCacheDir));
+    appendLog(QStringLiteral("Input reference mode active. Original input path: %1").arg(inputPath));
+}
+
+void MainWindow::handleJobResultFiles(const QJsonObject &result)
+{
+    if (m_currentJobId <= 0) {
+        appendLog(QStringLiteral("No current job id; skipping local result cache setup."));
+        return;
+    }
+
+    JobFileCacheManager cacheManager;
+    const QString inputPath = m_currentJobInputPath.isEmpty()
+        ? ui->inputPathLineEdit->text().trimmed()
+        : m_currentJobInputPath;
+    if (m_currentCaseKey.isEmpty()) {
+        m_currentCaseKey = cacheManager.caseKeyFromInputPath(inputPath);
+    }
+
+    cacheManager.ensureCaseCacheDir(m_currentCaseKey);
+    cacheManager.ensureJobCacheDir(m_currentJobId);
+
+    const QString caseCacheDir = cacheManager.getCaseCacheDir(m_currentCaseKey);
+    const QString resultJsonPath = cacheManager.localResultJsonPath(m_currentCaseKey);
+    m_currentServerResultJsonPath = result.value(QStringLiteral("resultJsonPath")).toString();
+    m_currentServerAiMaskPath = result.value(QStringLiteral("aiMaskPath")).toString();
+
+    writeJsonFile(resultJsonPath, result);
+
+    const QString localAiMaskPath = QFile::exists(cacheManager.localAiMaskPath(m_currentCaseKey))
+        ? cacheManager.localAiMaskJobPath(m_currentCaseKey, m_currentJobId)
+        : cacheManager.localAiMaskPath(m_currentCaseKey);
+    const QString localInputVolumePath = cacheManager.localInputVolumeZipPath(m_currentCaseKey, m_currentJobId);
+    const QString downloadUrl = m_backendFileClient->aiMaskDownloadUrl(m_currentJobId);
+    const QString inputDownloadUrl = m_backendFileClient->inputVolumeDownloadUrl(m_currentJobId);
+
+    appendLog(QStringLiteral("Job ID: %1").arg(m_currentJobId));
+    appendLog(QStringLiteral("Server input path: %1").arg(inputPath.isEmpty() ? QStringLiteral("-") : inputPath));
+    appendLog(QStringLiteral("Server AI mask path: %1").arg(m_currentServerAiMaskPath.isEmpty() ? QStringLiteral("-") : m_currentServerAiMaskPath));
+    appendLog(QStringLiteral("Case key: %1").arg(m_currentCaseKey));
+    appendLog(QStringLiteral("Local case cache: %1").arg(caseCacheDir));
+    appendLog(QStringLiteral("Saved result JSON to local cache: %1").arg(resultJsonPath));
+    appendLog(QStringLiteral("AI mask download URL: %1").arg(downloadUrl));
+    appendLog(QStringLiteral("Local AI mask target: %1").arg(localAiMaskPath));
+    appendLog(QStringLiteral("Input volume download URL: %1").arg(inputDownloadUrl));
+    appendLog(QStringLiteral("Local input volume target: %1").arg(localInputVolumePath));
+    appendLog(QStringLiteral("Viewer will load from local case cache after input volume and mask are present."));
+
+    QJsonObject jobMetadata;
+    jobMetadata.insert(QStringLiteral("jobId"), QString::number(m_currentJobId));
+    jobMetadata.insert(QStringLiteral("caseKey"), m_currentCaseKey);
+    jobMetadata.insert(QStringLiteral("originalInputPath"), inputPath);
+    jobMetadata.insert(QStringLiteral("serverResultJsonPath"), m_currentServerResultJsonPath);
+    jobMetadata.insert(QStringLiteral("serverAiMaskPath"), m_currentServerAiMaskPath);
+    jobMetadata.insert(QStringLiteral("serverInputPath"), inputPath);
+    jobMetadata.insert(QStringLiteral("localCaseCacheDir"), caseCacheDir);
+    jobMetadata.insert(QStringLiteral("localResultJsonPath"), resultJsonPath);
+    jobMetadata.insert(QStringLiteral("localAiMaskPath"), localAiMaskPath);
+    jobMetadata.insert(QStringLiteral("localInputVolumePath"), localInputVolumePath);
+    jobMetadata.insert(QStringLiteral("downloadUrl"), downloadUrl);
+    jobMetadata.insert(QStringLiteral("inputDownloadUrl"), inputDownloadUrl);
+    jobMetadata.insert(QStringLiteral("createdAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    jobMetadata.insert(QStringLiteral("downloadedAt"), QString());
+    cacheManager.writeJobMetadata(m_currentJobId, jobMetadata);
+
+    // Server-local paths such as /root/autodl-tmp/... are metadata only. The Qt
+    // client must download artifacts through backend endpoints into case cache.
+    m_backendFileClient->downloadAiMask(m_currentJobId, localAiMaskPath);
+    m_backendFileClient->downloadInputVolume(m_currentJobId, localInputVolumePath);
+}
+
+void MainWindow::tryLoadCurrentCaseFromCache()
+{
+    if (!m_ctViewerWidget || m_currentCaseKey.isEmpty()) {
+        return;
+    }
+
+    JobFileCacheManager cacheManager;
+    const QString caseDir = cacheManager.getCaseCacheDir(m_currentCaseKey);
+    const QString canonicalMaskPath = cacheManager.localAiMaskPath(m_currentCaseKey);
+    const QString inputVolumeDir = cacheManager.localInputVolumeDir(m_currentCaseKey);
+    const bool hasMask = QFileInfo::exists(canonicalMaskPath)
+        || !QDir(QDir(caseDir).filePath(QStringLiteral("ai_masks"))).entryInfoList({QStringLiteral("*.nrrd")}, QDir::Files).isEmpty();
+    const bool hasRawCt = QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("ct_volume_int16.raw")))
+        && QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("ct_volume_metadata.json")));
+    const bool hasInputArtifact = hasRawCt
+        || QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("dicom_series")))
+        || !QDir(inputVolumeDir).entryInfoList({QStringLiteral("input_volume_job_*.zip"),
+                                                QStringLiteral("*.nrrd"),
+                                                QStringLiteral("*.nii"),
+                                                QStringLiteral("*.nii.gz"),
+                                                QStringLiteral("*.mhd")},
+                                               QDir::Files).isEmpty();
+
+    if (!hasMask || !hasInputArtifact) {
+        appendLog(QStringLiteral("Case cache is not ready for real CT display yet. hasMask=%1 hasInput=%2")
+                      .arg(hasMask)
+                      .arg(hasInputArtifact));
+        return;
+    }
+
+    appendLog(QStringLiteral("Loading CT viewer from local case cache: %1").arg(caseDir));
+    m_ctViewerWidget->loadJobFilesFromCache(caseDir);
+}
+
+void MainWindow::loadMostRecentCaseCacheIfAvailable()
+{
+    if (!m_ctViewerWidget) {
+        return;
+    }
+
+    JobFileCacheManager cacheManager;
+    const QDir casesDir(QDir(cacheManager.baseCacheDir()).filePath(QStringLiteral("cases")));
+    const QFileInfoList caseDirs = casesDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+    for (const QFileInfo &caseInfo : caseDirs) {
+        const QString caseDir = caseInfo.absoluteFilePath();
+        const QString inputVolumeDir = QDir(caseDir).filePath(QStringLiteral("input_volume"));
+        const bool hasMask = QFileInfo::exists(QDir(caseDir).filePath(QStringLiteral("ai_mask_v0.nrrd")))
+            || !QDir(QDir(caseDir).filePath(QStringLiteral("ai_masks"))).entryInfoList({QStringLiteral("*.nrrd")}, QDir::Files).isEmpty();
+        const bool hasRawCt = QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("ct_volume_int16.raw")))
+            && QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("ct_volume_metadata.json")));
+        const bool hasInputArtifact = hasRawCt
+            || QFileInfo::exists(QDir(inputVolumeDir).filePath(QStringLiteral("dicom_series")))
+            || !QDir(inputVolumeDir).entryInfoList({QStringLiteral("input_volume_job_*.zip"),
+                                                    QStringLiteral("*.nrrd"),
+                                                    QStringLiteral("*.nii"),
+                                                    QStringLiteral("*.nii.gz"),
+                                                    QStringLiteral("*.mhd")},
+                                                   QDir::Files).isEmpty();
+        if (hasMask && hasInputArtifact) {
+            m_currentCaseKey = caseInfo.fileName();
+            appendLog(QStringLiteral("Found cached case for viewer startup: %1").arg(caseDir));
+            m_ctViewerWidget->loadJobFilesFromCache(caseDir);
+            return;
+        }
+    }
+}
+
+bool MainWindow::writeJsonFile(const QString &path, const QJsonObject &object) const
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    file.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
+    return true;
 }

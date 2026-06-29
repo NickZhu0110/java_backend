@@ -50,6 +50,8 @@ application-local.yaml
 
 # Medical data / runtime files
 data/
+!qt-cac-app/src/data/
+!qt-cac-app/src/data/**
 datasets/
 dicom/
 DICOM/

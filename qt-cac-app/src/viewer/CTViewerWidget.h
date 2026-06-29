@@ -9,8 +9,8 @@
 #include <QSlider>
 #include <QWidget>
 
-#include <cstdint>
-#include <vector>
+#include "data/MaskVolume.h"
+#include "data/VolumeData.h"
 
 class CTViewerWidget : public QWidget
 {
@@ -26,29 +26,6 @@ private slots:
     void setSliceIndex(int sliceIndex);
 
 private:
-    struct VolumeData {
-        int width = 0;
-        int height = 0;
-        int depth = 0;
-        std::vector<int16_t> huVoxels;
-
-        bool isValid() const;
-        size_t offset(int x, int y, int z) const;
-        int16_t value(int x, int y, int z) const;
-    };
-
-    struct MaskVolume {
-        int width = 0;
-        int height = 0;
-        int depth = 0;
-        std::vector<uint8_t> voxels;
-
-        bool isValid() const;
-        size_t offset(int x, int y, int z) const;
-        uint8_t value(int x, int y, int z) const;
-        void setValue(int x, int y, int z, uint8_t value);
-    };
-
     class GraphicsView : public QGraphicsView
     {
     public:
@@ -60,6 +37,7 @@ private:
 
     void createSyntheticStudy();
     void setupUi();
+    void setVolumeAndMask(const VolumeData &volume, const MaskVolume &mask, bool hasMask);
     void updateSliceImages();
     void updateSliceLabel();
     QImage renderCtSlice() const;
@@ -74,6 +52,8 @@ private:
 
     VolumeData m_volume;
     MaskVolume m_aiMask;
+    bool m_hasMask = false;
+    bool m_usingSyntheticFallback = true;
     int m_sliceIndex = 0;
     double m_windowWidth = 700.0;
     double m_windowLevel = 150.0;

@@ -23,8 +23,21 @@ qt_add_executable(qt-cac-app
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
+    src/cache/JobFileCacheManager.cpp
+    src/cache/JobFileCacheManager.h
+    src/io/BackendFileClient.cpp
+    src/io/BackendFileClient.h
+    src/data/MaskVolume.h
+    src/data/VolumeData.h
+    src/viewer/CaseVolumeLoader.cpp
+    src/viewer/CaseVolumeLoader.h
     src/viewer/CTViewerWidget.cpp
     src/viewer/CTViewerWidget.h
+    src/viewer/LoadedCaseVolume.h
+    src/viewer/PythonSimpleItkPreprocessor.cpp
+    src/viewer/PythonSimpleItkPreprocessor.h
+    src/viewer/RawVolumeLoader.cpp
+    src/viewer/RawVolumeLoader.h
 )
 
 target_include_directories(qt-cac-app

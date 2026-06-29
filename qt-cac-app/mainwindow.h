@@ -4,6 +4,7 @@
 #include <QMainWindow>
 
 class BackendClient;
+class BackendFileClient;
 class CTViewerWidget;
 class JobWebSocketClient;
 class QJsonObject;
@@ -39,12 +40,22 @@ private:
     void displayResult(const QJsonObject &result);
     void openServerSettings();
     void embedCtViewer();
+    void prepareCaseCacheForInput(const QString &inputPath);
+    void handleJobResultFiles(const QJsonObject &result);
+    void tryLoadCurrentCaseFromCache();
+    void loadMostRecentCaseCacheIfAvailable();
+    bool writeJsonFile(const QString &path, const QJsonObject &object) const;
 
     Ui::MainWindow *ui;
     BackendClient *m_backendClient;
+    BackendFileClient *m_backendFileClient;
     JobWebSocketClient *m_webSocketClient;
     CTViewerWidget *m_ctViewerWidget;
     qint64 m_currentJobId;
+    QString m_currentJobInputPath;
+    QString m_currentCaseKey;
+    QString m_currentServerResultJsonPath;
+    QString m_currentServerAiMaskPath;
     bool m_backendConnected;
 };
 #endif // MAINWINDOW_H

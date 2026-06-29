@@ -125,6 +125,42 @@ public class CacResultService {
         return new FileSystemResource(path);
     }
 
+    public Path resolveInputVolumePath(Long jobId) {
+        AnalysisJob job = ensureJobExists(jobId);
+        if (job.getInputPath() == null || job.getInputPath().isBlank()) {
+            log.warn("Input volume download failed: jobId={}, inputPath missing", jobId);
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Input path not found for job: " + jobId
+            );
+        }
+
+        Path path = Paths.get(job.getInputPath()).toAbsolutePath().normalize();
+        boolean exists = Files.exists(path);
+        boolean readable = Files.isReadable(path);
+        log.info("Input volume download check: jobId={}, path={}, exists={}, readable={}, isDirectory={}",
+                jobId, path, exists, readable, Files.isDirectory(path));
+
+        // TODO: Before production, restrict input artifact reads to a configured
+        // storage root such as cac.storage.root instead of trusting any persisted path.
+        if (!exists) {
+            log.warn("Input volume download failed: jobId={}, path={}, reason=missing", jobId, path);
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Input volume does not exist for job: " + jobId
+            );
+        }
+        if (!readable) {
+            log.error("Input volume download failed: jobId={}, path={}, reason=not readable", jobId, path);
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Input volume is not readable for job: " + jobId
+            );
+        }
+
+        return path;
+    }
+
     private AnalysisJob ensureJobExists(Long jobId) {
         AnalysisJob job = analysisJobMapper.selectById(jobId);
         if (job == null) {

@@ -1,5 +1,7 @@
 #include "viewer/CTViewerWidget.h"
 
+#include "viewer/CaseVolumeLoader.h"
+
 #include <QHBoxLayout>
 #include <QDebug>
 #include <QVBoxLayout>
@@ -7,7 +9,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <stdexcept>
 
 CTViewerWidget::CTViewerWidget(QWidget *parent)
     : QWidget(parent)
@@ -20,66 +21,38 @@ CTViewerWidget::CTViewerWidget(QWidget *parent)
 
 void CTViewerWidget::loadVolumeFromLocalPath(const QString &path)
 {
-    qInfo() << "Real medical image loading is not implemented yet. "
-               "ITK-based DICOM/NRRD/NIfTI/MHD loading will be integrated later."
+    qInfo() << "Volume artifact cached. Real loading is coordinated through loadJobFilesFromCache()."
             << "Requested volume path:" << path;
 }
 
 void CTViewerWidget::loadMaskFromLocalPath(const QString &path)
 {
-    qInfo() << "Real medical image loading is not implemented yet. "
-               "ITK-based DICOM/NRRD/NIfTI/MHD loading will be integrated later."
+    qInfo() << "Mask artifact cached. Real loading is coordinated through loadJobFilesFromCache()."
             << "Requested mask path:" << path;
 }
 
 void CTViewerWidget::loadJobFilesFromCache(const QString &caseCacheDir)
 {
-    qInfo() << "Real medical image loading is not implemented yet. "
-               "ITK-based DICOM/NRRD/NIfTI/MHD loading will be integrated later."
-            << "Requested case cache dir:" << caseCacheDir;
-}
-
-bool CTViewerWidget::VolumeData::isValid() const
-{
-    return width > 0 && height > 0 && depth > 0
-        && huVoxels.size() == static_cast<size_t>(width * height * depth);
-}
-
-size_t CTViewerWidget::VolumeData::offset(int x, int y, int z) const
-{
-    if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth) {
-        throw std::out_of_range("VolumeData index out of range");
+    qInfo() << "Real case cache detected; attempting CT/mask load:" << caseCacheDir;
+    CaseVolumeLoader loader;
+    QString processLog;
+    QString errorMessage;
+    LoadedCaseVolume loaded = loader.loadCaseFromCache(caseCacheDir, &processLog, &errorMessage);
+    if (!processLog.trimmed().isEmpty()) {
+        qInfo().noquote() << processLog.trimmed();
     }
-    return (static_cast<size_t>(z) * height + y) * width + x;
-}
-
-int16_t CTViewerWidget::VolumeData::value(int x, int y, int z) const
-{
-    return huVoxels[offset(x, y, z)];
-}
-
-bool CTViewerWidget::MaskVolume::isValid() const
-{
-    return width > 0 && height > 0 && depth > 0
-        && voxels.size() == static_cast<size_t>(width * height * depth);
-}
-
-size_t CTViewerWidget::MaskVolume::offset(int x, int y, int z) const
-{
-    if (x < 0 || x >= width || y < 0 || y >= height || z < 0 || z >= depth) {
-        throw std::out_of_range("MaskVolume index out of range");
+    for (const QString &warning : loaded.warnings) {
+        qWarning().noquote() << warning;
     }
-    return (static_cast<size_t>(z) * height + y) * width + x;
-}
+    if (!loaded.volume.isValid()) {
+        qWarning() << "Could not load real CT case; synthetic viewer fallback remains active."
+                   << errorMessage;
+        return;
+    }
 
-uint8_t CTViewerWidget::MaskVolume::value(int x, int y, int z) const
-{
-    return voxels[offset(x, y, z)];
-}
-
-void CTViewerWidget::MaskVolume::setValue(int x, int y, int z, uint8_t value)
-{
-    voxels[offset(x, y, z)] = value ? 1 : 0;
+    qInfo() << "Loading real CT volume into viewer"
+            << loaded.volume.width << "x" << loaded.volume.height << "x" << loaded.volume.depth;
+    setVolumeAndMask(loaded.volume, loaded.mask, loaded.hasMask);
 }
 
 CTViewerWidget::GraphicsView::GraphicsView(QWidget *parent)
@@ -118,6 +91,8 @@ void CTViewerWidget::createSyntheticStudy()
     m_aiMask.height = height;
     m_aiMask.depth = depth;
     m_aiMask.voxels.assign(static_cast<size_t>(width * height * depth), 0);
+    m_hasMask = true;
+    m_usingSyntheticFallback = true;
 
     const double cx = width / 2.0;
     const double cy = height / 2.0;
@@ -183,6 +158,29 @@ void CTViewerWidget::setupUi()
             this, &CTViewerWidget::setSliceIndex);
 }
 
+void CTViewerWidget::setVolumeAndMask(const VolumeData &volume, const MaskVolume &mask, bool hasMask)
+{
+    if (!volume.isValid()) {
+        return;
+    }
+
+    m_volume = volume;
+    m_aiMask = mask;
+    m_hasMask = hasMask && mask.hasSameDimensionsAs(volume);
+    m_usingSyntheticFallback = false;
+    m_sliceIndex = std::clamp(m_sliceIndex, 0, m_volume.depth - 1);
+    m_sliceSlider->setRange(0, m_volume.depth - 1);
+    m_sliceSlider->setValue(m_sliceIndex);
+    m_scene->setSceneRect(0, 0, m_volume.width, m_volume.height);
+    updateSliceImages();
+    updateSliceLabel();
+    m_view->fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+
+    if (!m_hasMask && hasMask) {
+        qWarning() << "Loaded mask is not geometry-compatible with CT; overlay disabled.";
+    }
+}
+
 void CTViewerWidget::updateSliceImages()
 {
     if (!m_volume.isValid()) {
@@ -222,6 +220,12 @@ QImage CTViewerWidget::renderCtSlice() const
 
 QImage CTViewerWidget::renderMaskOverlay() const
 {
+    if (!m_hasMask || !m_aiMask.hasSameDimensionsAs(m_volume)) {
+        QImage empty(m_volume.width, m_volume.height, QImage::Format_ARGB32_Premultiplied);
+        empty.fill(Qt::transparent);
+        return empty;
+    }
+
     QImage image(m_aiMask.width, m_aiMask.height, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::transparent);
 

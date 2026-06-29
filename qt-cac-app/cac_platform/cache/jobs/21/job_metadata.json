@@ -1,0 +1,11 @@
+{
+    "caseKey": "Pro_Gated_CS_3.0_I30f_3_70",
+    "createdAt": "2026-06-29T03:45:45Z",
+    "downloadedAt": "",
+    "jobId": "21",
+    "localAiMaskPath": "/Users/nick/Desktop/java_backend/qt-cac-app/cac_platform/cache/cases/Pro_Gated_CS_3.0_I30f_3_70/ai_mask_v0.nrrd",
+    "localCaseCacheDir": "/Users/nick/Desktop/java_backend/qt-cac-app/cac_platform/cache/cases/Pro_Gated_CS_3.0_I30f_3_70",
+    "originalInputPath": "/root/autodl-tmp/gated_0_5/patient/0/Pro_Gated_CS_3.0_I30f_3_70%",
+    "serverAiMaskPath": "/root/autodl-tmp/result/raw_outputs/case_0_multi_lesion.nrrd",
+    "serverResultJsonPath": "/root/autodl-tmp/result/result.json"
+}

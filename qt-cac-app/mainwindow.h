@@ -4,6 +4,7 @@
 #include <QMainWindow>
 
 class BackendClient;
+class CTViewerWidget;
 class JobWebSocketClient;
 class QJsonObject;
 class QLineEdit;
@@ -37,10 +38,12 @@ private:
     void browseFile(QLineEdit *lineEdit, const QString &filter);
     void displayResult(const QJsonObject &result);
     void openServerSettings();
+    void embedCtViewer();
 
     Ui::MainWindow *ui;
     BackendClient *m_backendClient;
     JobWebSocketClient *m_webSocketClient;
+    CTViewerWidget *m_ctViewerWidget;
     qint64 m_currentJobId;
     bool m_backendConnected;
 };

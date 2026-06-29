@@ -1,13 +1,16 @@
 #include "mainwindow.h"
 #include "BackendClient.h"
+#include "viewer/CTViewerWidget.h"
 #include "JobWebSocketClient.h"
 #include "ServerSettingsDialog.h"
 #include "ui_mainwindow.h"
 
 #include <QFileDialog>
+#include <QBoxLayout>
 #include <QCheckBox>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
@@ -17,10 +20,12 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
     , m_backendClient(new BackendClient(this))
     , m_webSocketClient(new JobWebSocketClient(this))
+    , m_ctViewerWidget(nullptr)
     , m_currentJobId(-1)
     , m_backendConnected(false)
 {
     ui->setupUi(this);
+    embedCtViewer();
     setupInitialState();
     connectSignals();
 }
@@ -117,6 +122,7 @@ void MainWindow::connectSignals()
     connect(m_webSocketClient, &JobWebSocketClient::errorOccurred, this, [this](const QString &message) {
         appendLog(message);
     });
+
 }
 
 void MainWindow::appendLog(const QString &message)
@@ -298,4 +304,30 @@ void MainWindow::openServerSettings()
         m_webSocketClient->setWebSocketUrl(dialog.webSocketUrl());
         appendLog(QStringLiteral("Server settings saved"));
     }
+}
+
+void MainWindow::embedCtViewer()
+{
+    QWidget *placeholder = ui->dicomViewerPlaceholderLabel;
+    QWidget *parentWidget = placeholder ? placeholder->parentWidget() : nullptr;
+    QLayout *parentLayout = parentWidget ? parentWidget->layout() : nullptr;
+    auto *boxLayout = qobject_cast<QBoxLayout *>(parentLayout);
+    if (!placeholder || !parentWidget || !parentLayout || !boxLayout) {
+        appendLog(QStringLiteral("CT viewer placeholder not found; keeping existing UI."));
+        return;
+    }
+
+    const int index = parentLayout->indexOf(placeholder);
+    if (index < 0) {
+        appendLog(QStringLiteral("CT viewer placeholder is not in its parent layout; keeping existing UI."));
+        return;
+    }
+
+    m_ctViewerWidget = new CTViewerWidget(parentWidget);
+    m_ctViewerWidget->setObjectName(QStringLiteral("ctViewerWidget"));
+
+    parentLayout->removeWidget(placeholder);
+    placeholder->hide();
+    placeholder->deleteLater();
+    boxLayout->insertWidget(index, m_ctViewerWidget);
 }

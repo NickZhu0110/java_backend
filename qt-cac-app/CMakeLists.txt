@@ -23,6 +23,13 @@ qt_add_executable(qt-cac-app
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
+    src/viewer/CTViewerWidget.cpp
+    src/viewer/CTViewerWidget.h
+)
+
+target_include_directories(qt-cac-app
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(qt-cac-app

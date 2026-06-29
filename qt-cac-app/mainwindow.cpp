@@ -51,6 +51,12 @@ void MainWindow::setupInitialState()
     ui->enableAdvancedOverridesCheckBox->setChecked(false);
     ui->useZeroModuleCheckBox->setChecked(false);
     ui->progressBar->setRange(0, 100);
+
+#if !ENABLE_CT_VIEWER
+    ui->dicomViewerPlaceholder->hide();
+    ui->annotationGroupBox->hide();
+#endif
+
     setAdvancedOverridesEnabled(false);
     setBackendConnected(false, QStringLiteral("Backend: Not connected"));
     resetForm();

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 project(qt-cac-app LANGUAGES CXX)
 
+option(ENABLE_CT_VIEWER "Enable unfinished CT viewer integration and related UI entry points" OFF)
+
 find_package(Qt6 6.5 REQUIRED COMPONENTS
     Core
     Widgets
@@ -31,6 +33,11 @@ target_link_libraries(qt-cac-app
         Qt::Widgets
         Qt::Network
         Qt::WebSockets
+)
+
+target_compile_definitions(qt-cac-app
+    PRIVATE
+        ENABLE_CT_VIEWER=$<IF:$<BOOL:${ENABLE_CT_VIEWER}>,1,0>
 )
 
 install(TARGETS qt-cac-app

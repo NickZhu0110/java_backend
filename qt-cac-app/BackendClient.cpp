@@ -18,7 +18,7 @@ void BackendClient::loadSettings()
 {
     QSettings settings;
     setBaseUrl(settings.value(QStringLiteral("server/backendUrl"),
-                              QStringLiteral("http://localhost:8080")).toString());
+                              QStringLiteral("http://localhost:16006")).toString());
 }
 
 void BackendClient::setBaseUrl(const QString &baseUrl)
@@ -28,7 +28,7 @@ void BackendClient::setBaseUrl(const QString &baseUrl)
         m_baseUrl.chop(1);
     }
     if (m_baseUrl.isEmpty()) {
-        m_baseUrl = QStringLiteral("http://localhost:8080");
+        m_baseUrl = QStringLiteral("http://localhost:16006");
     }
 }
 

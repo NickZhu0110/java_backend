@@ -29,13 +29,13 @@ void JobWebSocketClient::loadSettings()
 {
     QSettings settings;
     setWebSocketUrl(settings.value(QStringLiteral("server/webSocketUrl"),
-                                   QStringLiteral("ws://localhost:8080/ws/jobs")).toString());
+                                   QStringLiteral("ws://localhost:16006/ws/jobs")).toString());
 }
 
 void JobWebSocketClient::setWebSocketUrl(const QString &url)
 {
     const QString trimmedUrl = url.trimmed();
-    m_url = QUrl(trimmedUrl.isEmpty() ? QStringLiteral("ws://localhost:8080/ws/jobs") : trimmedUrl);
+    m_url = QUrl(trimmedUrl.isEmpty() ? QStringLiteral("ws://localhost:16006/ws/jobs") : trimmedUrl);
 }
 
 void JobWebSocketClient::connectToServer(qint64 jobId)

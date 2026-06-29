@@ -8,7 +8,22 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    from confluent_kafka import Consumer as ConfluentConsumer
+    from confluent_kafka import KafkaError, KafkaException
+except ImportError:
+    ConfluentConsumer = None
+    KafkaError = None
+    KafkaException = RuntimeError
+
+try:
+    from kafka import KafkaConsumer as PythonKafkaConsumer
+except ImportError:
+    PythonKafkaConsumer = None
 
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -37,20 +52,83 @@ USE_ZERO_MODULE = os.getenv("USE_ZERO_MODULE", "false").strip().lower() in {
 running = True
 
 
+class KafkaMessageAdapter:
+    def __init__(self, message: Any) -> None:
+        self._message = message
+
+    def error(self) -> None:
+        return None
+
+    def topic(self) -> str:
+        return str(self._message.topic)
+
+    def partition(self) -> int:
+        return int(self._message.partition)
+
+    def offset(self) -> int:
+        return int(self._message.offset)
+
+    def value(self) -> bytes:
+        return bytes(self._message.value)
+
+
+class KafkaPythonConsumerAdapter:
+    def __init__(self, consumer: Any) -> None:
+        self._consumer = consumer
+        self._topics: list[str] = []
+
+    def subscribe(self, topics: list[str]) -> None:
+        self._topics = topics
+        self._consumer.subscribe(topics)
+
+    def poll(self, timeout_seconds: float) -> Optional[KafkaMessageAdapter]:
+        timeout_ms = max(int(timeout_seconds * 1000), 0)
+        records = self._consumer.poll(timeout_ms=timeout_ms, max_records=1)
+        if not records:
+            return None
+        for batch in records.values():
+            if batch:
+                return KafkaMessageAdapter(batch[0])
+        return None
+
+    def commit(self, message: Any = None) -> None:
+        self._consumer.commit()
+
+    def close(self) -> None:
+        self._consumer.close()
+
+
 def handle_shutdown(signum: int, frame: Any) -> None:
     global running
     running = False
     print("\n[worker] shutdown requested, closing consumer after current poll...")
 
 
-def create_consumer() -> Consumer:
-    return Consumer(
-        {
-            "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-            "group.id": KAFKA_GROUP_ID,
-            "auto.offset.reset": "latest",
-            "enable.auto.commit": False,
-        }
+def create_consumer() -> Any:
+    if ConfluentConsumer is not None:
+        print("[worker] kafka client=confluent-kafka")
+        return ConfluentConsumer(
+            {
+                "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+                "group.id": KAFKA_GROUP_ID,
+                "auto.offset.reset": "earliest",
+                "enable.auto.commit": False,
+            }
+        )
+
+    if PythonKafkaConsumer is not None:
+        print("[worker] kafka client=kafka-python")
+        consumer = PythonKafkaConsumer(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            group_id=KAFKA_GROUP_ID,
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            consumer_timeout_ms=1000,
+        )
+        return KafkaPythonConsumerAdapter(consumer)
+
+    raise RuntimeError(
+        "No Kafka client available. Install confluent-kafka or kafka-python in the worker environment."
     )
 
 

@@ -15,12 +15,23 @@ public class AnalysisEventProducer {
     private static final String ANALYSIS_REQUESTED_TOPIC = "cac.analysis.requested";
 
     private final KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate;
+    private final LocalDirectAnalysisService localDirectAnalysisService;
 
-    public AnalysisEventProducer(KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate) {
+    public AnalysisEventProducer(
+            KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate,
+            LocalDirectAnalysisService localDirectAnalysisService
+    ) {
         this.kafkaTemplate = kafkaTemplate;
+        this.localDirectAnalysisService = localDirectAnalysisService;
     }
 
     public void publishAnalysisRequested(AnalysisJob job) {
+        if (localDirectAnalysisService.isEnabled()) {
+            log.info("Dispatching local direct analysis for job {}", job.getId());
+            localDirectAnalysisService.dispatch(job);
+            return;
+        }
+
         AnalysisRequestedEvent event = new AnalysisRequestedEvent(
                 job.getId(),
                 job.getModelName(),

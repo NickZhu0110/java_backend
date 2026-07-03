@@ -1,2 +1,0 @@
-confluent-kafka==2.4.0
-requests>=2.32.0

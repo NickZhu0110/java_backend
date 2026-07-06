@@ -5,6 +5,7 @@ import com.cac.backend.entity.AnalysisJob;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -15,20 +16,21 @@ public class AnalysisEventProducer {
     private static final String ANALYSIS_REQUESTED_TOPIC = "cac.analysis.requested";
 
     private final KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate;
-    private final LocalDirectAnalysisService localDirectAnalysisService;
+    private final ObjectProvider<LocalAnalysisRunner> localAnalysisRunnerProvider;
 
     public AnalysisEventProducer(
             KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate,
-            LocalDirectAnalysisService localDirectAnalysisService
+            ObjectProvider<LocalAnalysisRunner> localAnalysisRunnerProvider
     ) {
         this.kafkaTemplate = kafkaTemplate;
-        this.localDirectAnalysisService = localDirectAnalysisService;
+        this.localAnalysisRunnerProvider = localAnalysisRunnerProvider;
     }
 
     public void publishAnalysisRequested(AnalysisJob job) {
-        if (localDirectAnalysisService.isEnabled()) {
-            log.info("Dispatching local direct analysis for job {}", job.getId());
-            localDirectAnalysisService.dispatch(job);
+        LocalAnalysisRunner localAnalysisRunner = localAnalysisRunnerProvider.getIfAvailable();
+        if (localAnalysisRunner != null) {
+            log.info("Dispatching local analysis for job {}", job.getId());
+            localAnalysisRunner.dispatch(job);
             return;
         }
 

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -21,10 +22,11 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 @Service
-public class LocalDirectAnalysisService {
+@Profile("local")
+public class LocalAnalysisRunner {
 
-    private static final Logger log = LoggerFactory.getLogger(LocalDirectAnalysisService.class);
-    private static final String LOCAL_WORKER_ID = "local-direct";
+    private static final Logger log = LoggerFactory.getLogger(LocalAnalysisRunner.class);
+    private static final String LOCAL_WORKER_ID = "local-process-runner";
 
     private final AnalysisJobMapper analysisJobMapper;
     private final JobCacheService jobCacheService;
@@ -32,31 +34,31 @@ public class LocalDirectAnalysisService {
     private final CacResultService cacResultService;
     private final ObjectMapper objectMapper;
 
-    @Value("${app.analysis.mode:kafka}")
-    private String analysisMode;
-
-    @Value("${app.analysis.local-direct.python-exe:}")
+    @Value("${app.local-analysis.python-exe}")
     private String pythonExe;
 
-    @Value("${app.analysis.local-direct.wrapper-path:}")
+    @Value("${app.local-analysis.wrapper-path}")
     private String wrapperPath;
 
-    @Value("${app.analysis.local-direct.segmentcacs-src:}")
+    @Value("${app.local-analysis.segmentcacs-src}")
     private String segmentcacsSrc;
 
-    @Value("${app.analysis.local-direct.model-path:}")
+    @Value("${app.local-analysis.model-path}")
     private String modelPath;
 
-    @Value("${app.analysis.local-direct.file-type:dcm}")
+    @Value("${app.local-analysis.data-root}")
+    private String dataRoot;
+
+    @Value("${app.local-analysis.file-type:dcm}")
     private String fileType;
 
-    @Value("${app.analysis.local-direct.device:cpu}")
+    @Value("${app.local-analysis.device:cpu}")
     private String device;
 
-    @Value("${app.analysis.local-direct.use-zero-module:false}")
+    @Value("${app.local-analysis.use-zero-module:false}")
     private boolean useZeroModule;
 
-    public LocalDirectAnalysisService(
+    public LocalAnalysisRunner(
             AnalysisJobMapper analysisJobMapper,
             JobCacheService jobCacheService,
             JobWebSocketHandler jobWebSocketHandler,
@@ -70,10 +72,6 @@ public class LocalDirectAnalysisService {
         this.objectMapper = objectMapper;
     }
 
-    public boolean isEnabled() {
-        return "local_direct".equalsIgnoreCase(analysisMode);
-    }
-
     public void dispatch(AnalysisJob job) {
         CompletableFuture.runAsync(() -> runJob(job));
     }
@@ -82,21 +80,25 @@ public class LocalDirectAnalysisService {
         try {
             validateConfig();
 
-            Path outputDir = Path.of(job.getOutputPath());
+            Path inputPath = resolveJobPath(job.getInputPath());
+            Path outputDir = resolveJobPath(job.getOutputPath());
             Files.createDirectories(outputDir);
+
+            Path logFile = logsRoot().resolve(job.getId() + ".log");
+            Files.createDirectories(logFile.getParent());
+
             updateStatus(job.getId(), "RUNNING", 5, null);
 
-            Path backendLog = outputDir.resolve("backend-direct.log");
-            Process process = new ProcessBuilder(buildCommand(job))
+            Process process = new ProcessBuilder(buildCommand(inputPath, outputDir))
                     .redirectErrorStream(true)
-                    .redirectOutput(backendLog.toFile())
+                    .redirectOutput(logFile.toFile())
                     .start();
 
             int exitCode = process.waitFor();
             if (exitCode != 0) {
                 throw new IllegalStateException(
                         "SEGMENT-CACS exited with code " + exitCode
-                                + ". See " + normalizePath(backendLog)
+                                + ". See " + normalizePath(logFile)
                 );
             }
 
@@ -107,12 +109,37 @@ public class LocalDirectAnalysisService {
                 );
             }
 
+            updateStatus(job.getId(), "RUNNING", 80, null);
             saveResult(job.getId(), outputDir, resultJson);
             updateStatus(job.getId(), "SUCCESS", 100, null);
         } catch (Exception ex) {
-            log.error("Local direct analysis failed for job {}", job.getId(), ex);
+            log.error("Local analysis failed for job {}", job.getId(), ex);
             updateStatus(job.getId(), "FAILED", 100, safeMessage(ex));
         }
+    }
+
+    private List<String> buildCommand(Path inputPath, Path outputDir) {
+        List<String> command = new ArrayList<>();
+        command.add(pythonExe);
+        command.add(wrapperPath);
+        command.add("--segmentcacs-src");
+        command.add(segmentcacsSrc);
+        command.add("--model");
+        command.add(modelPath);
+        command.add("--input");
+        command.add(normalizePath(inputPath));
+        command.add("--output");
+        command.add(normalizePath(outputDir));
+        command.add("--file-type");
+        command.add(fileType);
+        command.add("--device");
+        command.add(device);
+
+        if (useZeroModule) {
+            command.add("--use-zero-module");
+        }
+
+        return command;
     }
 
     private void saveResult(Long jobId, Path outputDir, Path resultJson) throws IOException {
@@ -134,41 +161,53 @@ public class LocalDirectAnalysisService {
         cacResultService.saveOrUpdateResult(jobId, request);
     }
 
-    private List<String> buildCommand(AnalysisJob job) {
-        List<String> command = new ArrayList<>();
-        command.add(pythonExe);
-        command.add(wrapperPath);
-        command.add("--segmentcacs-src");
-        command.add(segmentcacsSrc);
-        command.add("--model");
-        command.add(modelPath);
-        command.add("--input");
-        command.add(job.getInputPath());
-        command.add("--output");
-        command.add(job.getOutputPath());
-        command.add("--file-type");
-        command.add(fileType);
-        command.add("--device");
-        command.add(device);
-
-        if (useZeroModule) {
-            command.add("--use-zero-module");
-        }
-
-        return command;
-    }
-
-    private void validateConfig() {
-        requireConfigured(pythonExe, "SEGMENTCACS_PYTHON_EXE");
-        requireConfigured(wrapperPath, "SEGMENTCACS_WRAPPER");
-        requireConfigured(segmentcacsSrc, "SEGMENTCACS_SRC");
-        requireConfigured(modelPath, "MODEL_PATH");
+    private void validateConfig() throws IOException {
+        requireConfigured(pythonExe, "app.local-analysis.python-exe");
+        requireConfigured(wrapperPath, "app.local-analysis.wrapper-path");
+        requireConfigured(segmentcacsSrc, "app.local-analysis.segmentcacs-src");
+        requireConfigured(modelPath, "app.local-analysis.model-path");
+        requireConfigured(dataRoot, "app.local-analysis.data-root");
+        requireFile(pythonExe, "python executable");
+        requireFile(wrapperPath, "wrapper path");
+        requireDirectory(segmentcacsSrc, "segmentcacs src");
+        requireFile(modelPath, "model path");
+        Files.createDirectories(logsRoot());
     }
 
     private void requireConfigured(String value, String name) {
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("Missing required local direct setting: " + name);
+            throw new IllegalStateException("Missing required local analysis setting: " + name);
         }
+    }
+
+    private void requireFile(String value, String name) {
+        Path path = Path.of(value);
+        if (!Files.isRegularFile(path)) {
+            throw new IllegalStateException(name + " does not exist: " + normalizePath(path));
+        }
+    }
+
+    private void requireDirectory(String value, String name) {
+        Path path = Path.of(value);
+        if (!Files.isDirectory(path)) {
+            throw new IllegalStateException(name + " does not exist: " + normalizePath(path));
+        }
+    }
+
+    private Path resolveJobPath(String value) {
+        Path path = Path.of(value);
+        if (path.isAbsolute()) {
+            return path.normalize();
+        }
+        return dataRootPath().resolve(path).normalize();
+    }
+
+    private Path dataRootPath() {
+        return Path.of(dataRoot);
+    }
+
+    private Path logsRoot() {
+        return dataRootPath().resolve("logs").resolve("jobs");
     }
 
     private void updateStatus(Long jobId, String status, Integer progress, String errorMessage) {

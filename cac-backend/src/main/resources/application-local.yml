@@ -1,0 +1,28 @@
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  datasource:
+    url: jdbc:h2:file:${app.local-analysis.data-root}/db/cac-platform;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  kafka:
+    bootstrap-servers: ${LOCAL_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+app:
+  local-analysis:
+    python-exe: ${LOCAL_PYTHON_EXE:C:/cac-runtime/cac-platform/python-worker/.venv/Scripts/python.exe}
+    wrapper-path: ${LOCAL_SEGMENTCACS_WRAPPER:C:/cac-runtime/SEGMENT-CACS/model-service-python/run_segmentcacs.py}
+    segmentcacs-src: ${LOCAL_SEGMENTCACS_SRC:C:/cac-runtime/SEGMENT-CACS/src}
+    model-path: ${LOCAL_SEGMENTCACS_MODEL:C:/cac-runtime/SEGMENT-CACS/data/model/SegmentCACS_0001619_unet.pt}
+    data-root: ${LOCAL_DATA_ROOT:./local-data}
+    file-type: ${LOCAL_FILE_TYPE:dcm}
+    device: ${LOCAL_DEVICE:cpu}
+    use-zero-module: ${LOCAL_USE_ZERO_MODULE:false}

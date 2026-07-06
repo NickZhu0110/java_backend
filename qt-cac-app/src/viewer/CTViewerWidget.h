@@ -2,6 +2,7 @@
 
 #include <QGraphicsPixmapItem>
 #include <QGraphicsEllipseItem>
+#include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QImage>
@@ -19,6 +20,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <vector>
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
 
@@ -69,6 +71,12 @@ private:
         uint8_t newValue = 0;
     };
 
+    struct VoxelCoord {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+    };
+
     struct EditOperation {
         EditOperationType type = EditOperationType::BrushAdd;
         ViewOrientation orientation = ViewOrientation::Axial;
@@ -110,6 +118,7 @@ private:
         QGraphicsPixmapItem *ctLayer = nullptr;
         QGraphicsPixmapItem *aiMaskLayer = nullptr;
         QGraphicsPixmapItem *workingMaskLayer = nullptr;
+        QGraphicsPathItem *brushVoxelPreviewItem = nullptr;
         QGraphicsEllipseItem *brushCursorItem = nullptr;
         QSlider *sliceSlider = nullptr;
         QLabel *sliceLabel = nullptr;
@@ -164,6 +173,8 @@ private:
     void resetActiveBrushStroke();
     bool stampBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos);
     void mergeActiveBrushChange(const PixelChange &change);
+    std::vector<VoxelCoord> computeBrushAffectedVoxels(ViewOrientation orientation, const QPointF &scenePos, double radiusMm) const;
+    QRectF voxelSceneRect(ViewOrientation orientation, int x, int y, int z) const;
     bool scenePointToVoxel(ViewOrientation orientation, const QPointF &scenePos, int *x, int *y, int *z) const;
     bool slicePointToVoxel(ViewOrientation orientation, int u, int v, int sliceIndex, int *x, int *y, int *z) const;
     void applyEditOperation(const EditOperation &operation, bool useNewValues);

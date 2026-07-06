@@ -18,6 +18,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMouseEvent>
+#include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -436,6 +437,9 @@ void CTViewerWidget::setupViewPanel(ViewPanel &viewPanel, ViewOrientation orient
     viewPanel.aiMaskLayer->setZValue(10.0);
     viewPanel.workingMaskLayer = viewPanel.scene->addPixmap(QPixmap());
     viewPanel.workingMaskLayer->setZValue(20.0);
+    viewPanel.brushVoxelPreviewItem = viewPanel.scene->addPath(QPainterPath());
+    viewPanel.brushVoxelPreviewItem->setZValue(29.0);
+    viewPanel.brushVoxelPreviewItem->setVisible(false);
     viewPanel.brushCursorItem = viewPanel.scene->addEllipse(QRectF(), QPen(QColor(255, 220, 40), 1.5), Qt::NoBrush);
     viewPanel.brushCursorItem->setZValue(30.0);
     viewPanel.brushCursorItem->setVisible(false);
@@ -656,6 +660,9 @@ void CTViewerWidget::applyLayerScale(ViewPanel &viewPanel)
     }
     if (viewPanel.brushCursorItem) {
         viewPanel.brushCursorItem->setTransform(QTransform());
+    }
+    if (viewPanel.brushVoxelPreviewItem) {
+        viewPanel.brushVoxelPreviewItem->setTransform(QTransform());
     }
 }
 
@@ -985,7 +992,8 @@ void CTViewerWidget::updateToolState()
 void CTViewerWidget::updateBrushCursor(ViewOrientation orientation, const QPointF &scenePos)
 {
     ViewPanel &viewPanel = panel(orientation);
-    if (!viewPanel.brushCursorItem || m_toolMode == ToolMode::ViewPan || !m_volume.isValid()) {
+    if ((!viewPanel.brushCursorItem && !viewPanel.brushVoxelPreviewItem)
+        || m_toolMode == ToolMode::ViewPan || !m_volume.isValid()) {
         return;
     }
 
@@ -994,18 +1002,45 @@ void CTViewerWidget::updateBrushCursor(ViewOrientation orientation, const QPoint
         ? QColor(40, 210, 255)
         : QColor(255, 220, 40);
     QColor fillColor = outlineColor;
-    fillColor.setAlpha(45);
+    fillColor.setAlpha(60);
 
-    viewPanel.brushCursorItem->setPen(QPen(outlineColor, 1.5));
-    viewPanel.brushCursorItem->setBrush(QBrush(fillColor));
-    viewPanel.brushCursorItem->setRect(scenePos.x() - radiusMm,
-                                       scenePos.y() - radiusMm,
-                                       radiusMm * 2.0,
-                                       radiusMm * 2.0);
-    viewPanel.brushCursorItem->setVisible(true);
+    QPen cellPen(outlineColor, 1.0);
+    cellPen.setCosmetic(true);
+    QPainterPath voxelPath;
+    const std::vector<VoxelCoord> affectedVoxels = computeBrushAffectedVoxels(orientation, scenePos, radiusMm);
+    for (const VoxelCoord &voxel : affectedVoxels) {
+        voxelPath.addRect(voxelSceneRect(orientation, voxel.x, voxel.y, voxel.z));
+    }
+    if (viewPanel.brushVoxelPreviewItem) {
+        viewPanel.brushVoxelPreviewItem->setPen(cellPen);
+        viewPanel.brushVoxelPreviewItem->setBrush(QBrush(fillColor));
+        viewPanel.brushVoxelPreviewItem->setPath(voxelPath);
+        viewPanel.brushVoxelPreviewItem->setVisible(!affectedVoxels.empty());
+    }
+
+    if (viewPanel.brushCursorItem) {
+        QColor guideColor = outlineColor;
+        guideColor.setAlpha(170);
+        QPen guidePen(guideColor, 1.0);
+        guidePen.setCosmetic(true);
+        viewPanel.brushCursorItem->setPen(guidePen);
+        viewPanel.brushCursorItem->setBrush(Qt::NoBrush);
+        viewPanel.brushCursorItem->setRect(scenePos.x() - radiusMm,
+                                           scenePos.y() - radiusMm,
+                                           radiusMm * 2.0,
+                                           radiusMm * 2.0);
+        viewPanel.brushCursorItem->setVisible(true);
+    }
     for (ViewPanel &otherPanel : m_viewPanels) {
-        if (otherPanel.orientation != orientation && otherPanel.brushCursorItem) {
+        if (otherPanel.orientation == orientation) {
+            continue;
+        }
+        if (otherPanel.brushCursorItem) {
             otherPanel.brushCursorItem->setVisible(false);
+        }
+        if (otherPanel.brushVoxelPreviewItem) {
+            otherPanel.brushVoxelPreviewItem->setVisible(false);
+            otherPanel.brushVoxelPreviewItem->setPath(QPainterPath());
         }
     }
 }
@@ -1015,6 +1050,10 @@ void CTViewerWidget::hideBrushCursor()
     for (ViewPanel &viewPanel : m_viewPanels) {
         if (viewPanel.brushCursorItem) {
             viewPanel.brushCursorItem->setVisible(false);
+        }
+        if (viewPanel.brushVoxelPreviewItem) {
+            viewPanel.brushVoxelPreviewItem->setVisible(false);
+            viewPanel.brushVoxelPreviewItem->setPath(QPainterPath());
         }
     }
 }
@@ -1303,28 +1342,21 @@ bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const Q
         return false;
     }
 
-    int centerX = 0;
-    int centerY = 0;
-    int centerZ = 0;
-    if (!scenePointToVoxel(orientation, scenePos, &centerX, &centerY, &centerZ)) {
-        return false;
-    }
-
-    const double spacingX = volumeSpacing(0);
-    const double spacingY = volumeSpacing(1);
-    const double spacingZ = volumeSpacing(2);
     const double radiusMm = m_brushRadiusSpinBox ? static_cast<double>(m_brushRadiusSpinBox->value()) : 1.0;
     const int targetValue = m_toolMode == ToolMode::BrushErase ? 0 : 1;
-    const double radiusSquaredMm = radiusMm * radiusMm;
+    const std::vector<VoxelCoord> affectedVoxels = computeBrushAffectedVoxels(orientation, scenePos, radiusMm);
     bool changedAny = false;
     ++m_activeBrushStampCount;
 
-    const auto applyVoxel = [&](int x, int y, int z) {
+    for (const VoxelCoord &voxel : affectedVoxels) {
+        const int x = voxel.x;
+        const int y = voxel.y;
+        const int z = voxel.z;
         const uint8_t previousValue = m_workingMask.value(x, y, z);
         const uint8_t newValue = static_cast<uint8_t>(targetValue);
         if (previousValue == newValue) {
             ++m_activeBrushNoOpVoxels;
-            return;
+            continue;
         }
 
         const int hu = m_volume.value(x, y, z);
@@ -1351,22 +1383,44 @@ bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const Q
         m_workingMask.setValue(x, y, z, newValue);
         mergeActiveBrushChange({x, y, z, previousValue, newValue});
         changedAny = true;
-    };
+    }
+
+    return changedAny;
+}
+
+std::vector<CTViewerWidget::VoxelCoord> CTViewerWidget::computeBrushAffectedVoxels(ViewOrientation orientation, const QPointF &scenePos, double radiusMm) const
+{
+    std::vector<VoxelCoord> voxels;
+    if (!m_volume.isValid()) {
+        return voxels;
+    }
+
+    int centerX = 0;
+    int centerY = 0;
+    int centerZ = 0;
+    if (!scenePointToVoxel(orientation, scenePos, &centerX, &centerY, &centerZ)) {
+        return voxels;
+    }
+
+    const double spacingX = volumeSpacing(0);
+    const double spacingY = volumeSpacing(1);
+    const double spacingZ = volumeSpacing(2);
+    const double radiusSquaredMm = radiusMm * radiusMm;
 
     switch (orientation) {
     case ViewOrientation::Axial: {
         const int radiusX = static_cast<int>(std::ceil(radiusMm / spacingX));
         const int radiusY = static_cast<int>(std::ceil(radiusMm / spacingY));
         const int minX = std::max(0, centerX - radiusX);
-        const int maxX = std::min(m_workingMask.width - 1, centerX + radiusX);
+        const int maxX = std::min(m_volume.width - 1, centerX + radiusX);
         const int minY = std::max(0, centerY - radiusY);
-        const int maxY = std::min(m_workingMask.height - 1, centerY + radiusY);
+        const int maxY = std::min(m_volume.height - 1, centerY + radiusY);
         for (int y = minY; y <= maxY; ++y) {
             for (int x = minX; x <= maxX; ++x) {
                 const double dxMm = (x - centerX) * spacingX;
                 const double dyMm = (y - centerY) * spacingY;
                 if (dxMm * dxMm + dyMm * dyMm <= radiusSquaredMm) {
-                    applyVoxel(x, y, centerZ);
+                    voxels.push_back({x, y, centerZ});
                 }
             }
         }
@@ -1376,15 +1430,15 @@ bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const Q
         const int radiusX = static_cast<int>(std::ceil(radiusMm / spacingX));
         const int radiusZ = static_cast<int>(std::ceil(radiusMm / spacingZ));
         const int minX = std::max(0, centerX - radiusX);
-        const int maxX = std::min(m_workingMask.width - 1, centerX + radiusX);
+        const int maxX = std::min(m_volume.width - 1, centerX + radiusX);
         const int minZ = std::max(0, centerZ - radiusZ);
-        const int maxZ = std::min(m_workingMask.depth - 1, centerZ + radiusZ);
+        const int maxZ = std::min(m_volume.depth - 1, centerZ + radiusZ);
         for (int z = minZ; z <= maxZ; ++z) {
             for (int x = minX; x <= maxX; ++x) {
                 const double dxMm = (x - centerX) * spacingX;
                 const double dzMm = (z - centerZ) * spacingZ;
                 if (dxMm * dxMm + dzMm * dzMm <= radiusSquaredMm) {
-                    applyVoxel(x, centerY, z);
+                    voxels.push_back({x, centerY, z});
                 }
             }
         }
@@ -1394,15 +1448,15 @@ bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const Q
         const int radiusY = static_cast<int>(std::ceil(radiusMm / spacingY));
         const int radiusZ = static_cast<int>(std::ceil(radiusMm / spacingZ));
         const int minY = std::max(0, centerY - radiusY);
-        const int maxY = std::min(m_workingMask.height - 1, centerY + radiusY);
+        const int maxY = std::min(m_volume.height - 1, centerY + radiusY);
         const int minZ = std::max(0, centerZ - radiusZ);
-        const int maxZ = std::min(m_workingMask.depth - 1, centerZ + radiusZ);
+        const int maxZ = std::min(m_volume.depth - 1, centerZ + radiusZ);
         for (int z = minZ; z <= maxZ; ++z) {
             for (int y = minY; y <= maxY; ++y) {
                 const double dyMm = (y - centerY) * spacingY;
                 const double dzMm = (z - centerZ) * spacingZ;
                 if (dyMm * dyMm + dzMm * dzMm <= radiusSquaredMm) {
-                    applyVoxel(centerX, y, z);
+                    voxels.push_back({centerX, y, z});
                 }
             }
         }
@@ -1410,7 +1464,28 @@ bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const Q
     }
     }
 
-    return changedAny;
+    if (voxels.empty()) {
+        voxels.push_back({centerX, centerY, centerZ});
+    }
+    return voxels;
+}
+
+QRectF CTViewerWidget::voxelSceneRect(ViewOrientation orientation, int x, int y, int z) const
+{
+    const double spacingX = volumeSpacing(0);
+    const double spacingY = volumeSpacing(1);
+    const double spacingZ = volumeSpacing(2);
+
+    switch (orientation) {
+    case ViewOrientation::Axial:
+        return QRectF(x * spacingX, y * spacingY, spacingX, spacingY);
+    case ViewOrientation::Coronal:
+        return QRectF(x * spacingX, z * spacingZ, spacingX, spacingZ);
+    case ViewOrientation::Sagittal:
+        return QRectF(y * spacingY, z * spacingZ, spacingY, spacingZ);
+    }
+
+    return QRectF();
 }
 
 void CTViewerWidget::mergeActiveBrushChange(const PixelChange &change)

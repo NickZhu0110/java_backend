@@ -18,6 +18,7 @@
 #include <QDateTime>
 
 #include <array>
+#include <unordered_map>
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
 
@@ -137,6 +138,7 @@ private:
     void setSliceIndex(ViewOrientation orientation, int sliceIndex);
     void updateSliceImages();
     void updateSliceImages(ViewOrientation orientation);
+    void updateMaskLayers(ViewOrientation orientation);
     void updateSliceLabel();
     void updateSliceLabel(ViewOrientation orientation);
     void updateAllSceneRects();
@@ -156,6 +158,12 @@ private:
     void hideBrushCursor();
     void ensureWorkingMask();
     void applyBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos);
+    void beginBrushStroke(ViewOrientation orientation, const QPointF &scenePos);
+    void continueBrushStroke(ViewOrientation orientation, const QPointF &scenePos);
+    void finishBrushStroke();
+    void resetActiveBrushStroke();
+    bool stampBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos);
+    void mergeActiveBrushChange(const PixelChange &change);
     bool scenePointToVoxel(ViewOrientation orientation, const QPointF &scenePos, int *x, int *y, int *z) const;
     bool slicePointToVoxel(ViewOrientation orientation, int u, int v, int sliceIndex, int *x, int *y, int *z) const;
     void applyEditOperation(const EditOperation &operation, bool useNewValues);
@@ -197,6 +205,21 @@ private:
     bool m_hasUnsavedMaskEdits = false;
     bool m_usingSyntheticFallback = true;
     bool m_isBrushDragging = false;
+    bool m_hasLastBrushPoint = false;
+    ViewOrientation m_activeBrushOrientation = ViewOrientation::Axial;
+    QPointF m_lastBrushScenePoint;
+    EditOperation m_activeBrushOperation;
+    std::unordered_map<size_t, size_t> m_activeBrushChangeIndexByOffset;
+    double m_activeBrushDistanceMm = 0.0;
+    double m_activeBrushStepMm = 0.0;
+    int m_activeBrushStampCount = 0;
+    int m_activeBrushChangedVoxelsHU130 = 0;
+    int m_activeBrushNewlyAddedVsAi = 0;
+    int m_activeBrushErasedAiVoxels = 0;
+    int m_activeBrushNoOpVoxels = 0;
+    int m_activeBrushMinChangedHU = 0;
+    int m_activeBrushMaxChangedHU = 0;
+    bool m_activeBrushHasChangedHu = false;
     ToolMode m_toolMode = ToolMode::ViewPan;
     std::vector<EditOperation> m_undoStack;
     std::vector<EditOperation> m_redoStack;

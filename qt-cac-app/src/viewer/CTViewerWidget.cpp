@@ -5,6 +5,7 @@
 #include <QButtonGroup>
 #include <QBrush>
 #include <QCheckBox>
+#include <QCursor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -119,13 +120,20 @@ bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
     }
 
     switch (event->type()) {
+    case QEvent::Enter: {
+        eventPanel->view->viewport()->setCursor(Qt::BlankCursor);
+        const QPoint viewPos = eventPanel->view->viewport()->mapFromGlobal(QCursor::pos());
+        if (eventPanel->view->viewport()->rect().contains(viewPos)) {
+            updateBrushCursor(eventPanel->orientation, eventPanel->view->mapToScene(viewPos));
+        }
+        return false;
+    }
     case QEvent::MouseButtonPress: {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {
             const QPointF scenePos = eventPanel->view->mapToScene(mouseEvent->pos());
-            m_isBrushDragging = true;
             updateBrushCursor(eventPanel->orientation, scenePos);
-            applyBrushAtScenePoint(eventPanel->orientation, scenePos);
+            beginBrushStroke(eventPanel->orientation, scenePos);
             return true;
         }
         break;
@@ -135,20 +143,20 @@ bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
         const QPointF scenePos = eventPanel->view->mapToScene(mouseEvent->pos());
         updateBrushCursor(eventPanel->orientation, scenePos);
         if (m_isBrushDragging && (mouseEvent->buttons() & Qt::LeftButton)) {
-            applyBrushAtScenePoint(eventPanel->orientation, scenePos);
+            continueBrushStroke(eventPanel->orientation, scenePos);
         }
         return true;
     }
     case QEvent::MouseButtonRelease: {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {
-            m_isBrushDragging = false;
+            finishBrushStroke();
             return true;
         }
         break;
     }
     case QEvent::Leave:
-        m_isBrushDragging = false;
+        finishBrushStroke();
         hideBrushCursor();
         break;
     default:
@@ -850,6 +858,21 @@ void CTViewerWidget::updateSliceImages(ViewOrientation orientation)
     }
 
     viewPanel.ctLayer->setPixmap(QPixmap::fromImage(renderCtSlice(orientation, viewPanel.sliceIndex)));
+    updateMaskLayers(orientation);
+    updateToolState();
+}
+
+void CTViewerWidget::updateMaskLayers(ViewOrientation orientation)
+{
+    if (!m_volume.isValid()) {
+        return;
+    }
+
+    ViewPanel &viewPanel = panel(orientation);
+    if (!viewPanel.scene) {
+        return;
+    }
+
     const bool aiRequested = m_showAiMaskCheckBox && m_showAiMaskCheckBox->isChecked();
     const bool workingRequested = m_showWorkingMaskCheckBox && m_showWorkingMaskCheckBox->isChecked();
     const bool showAiMask = aiRequested
@@ -880,7 +903,6 @@ void CTViewerWidget::updateSliceImages(ViewOrientation orientation)
     }
     viewPanel.scene->update(viewPanel.scene->sceneRect());
     viewPanel.view->viewport()->update();
-    updateToolState();
 }
 
 void CTViewerWidget::updateSliceLabel()
@@ -938,7 +960,11 @@ void CTViewerWidget::updateToolState()
     for (ViewPanel &viewPanel : m_viewPanels) {
         if (viewPanel.view) {
             viewPanel.view->setDragMode(editToolActive ? QGraphicsView::NoDrag : QGraphicsView::ScrollHandDrag);
-            viewPanel.view->viewport()->setCursor(editToolActive ? Qt::BlankCursor : Qt::ArrowCursor);
+            if (editToolActive) {
+                viewPanel.view->viewport()->setCursor(Qt::BlankCursor);
+            } else {
+                viewPanel.view->viewport()->unsetCursor();
+            }
         }
     }
     if (!editToolActive) {
@@ -1140,6 +1166,12 @@ uint8_t CTViewerWidget::sampleMaskNearest(const MaskVolume &mask, double x, doub
 
 void CTViewerWidget::applyBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos)
 {
+    beginBrushStroke(orientation, scenePos);
+    finishBrushStroke();
+}
+
+void CTViewerWidget::beginBrushStroke(ViewOrientation orientation, const QPointF &scenePos)
+{
     ensureWorkingMask();
     if (!m_hasWorkingMask || !m_workingMask.hasSameDimensionsAs(m_volume)) {
         return;
@@ -1153,60 +1185,172 @@ void CTViewerWidget::applyBrushAtScenePoint(ViewOrientation orientation, const Q
     }
 
     const double radiusMm = m_brushRadiusSpinBox ? static_cast<double>(m_brushRadiusSpinBox->value()) : 1.0;
-    const int targetValue = m_toolMode == ToolMode::BrushErase ? 0 : 1;
-    EditOperation operation;
-    operation.type = m_toolMode == ToolMode::BrushErase ? EditOperationType::BrushErase : EditOperationType::BrushAdd;
-    operation.orientation = orientation;
-    operation.sliceIndex = panel(orientation).sliceIndex;
-    operation.centerX = centerX;
-    operation.centerY = centerY;
-    operation.centerZ = centerZ;
-    operation.radius = static_cast<int>(std::lround(radiusMm));
-    operation.timestampUtc = QDateTime::currentDateTimeUtc();
+    resetActiveBrushStroke();
+    m_isBrushDragging = true;
+    m_hasLastBrushPoint = true;
+    m_activeBrushOrientation = orientation;
+    m_lastBrushScenePoint = scenePos;
+    m_activeBrushStepMm = std::max(0.5, radiusMm * 0.33);
+    m_activeBrushOperation.type = m_toolMode == ToolMode::BrushErase ? EditOperationType::BrushErase : EditOperationType::BrushAdd;
+    m_activeBrushOperation.orientation = orientation;
+    m_activeBrushOperation.sliceIndex = panel(orientation).sliceIndex;
+    m_activeBrushOperation.centerX = centerX;
+    m_activeBrushOperation.centerY = centerY;
+    m_activeBrushOperation.centerZ = centerZ;
+    m_activeBrushOperation.radius = static_cast<int>(std::lround(radiusMm));
+    m_activeBrushOperation.timestampUtc = QDateTime::currentDateTimeUtc();
+
+    stampBrushAtScenePoint(orientation, scenePos);
+    updateMaskLayers(orientation);
+    updateBrushCursor(orientation, scenePos);
+}
+
+void CTViewerWidget::continueBrushStroke(ViewOrientation orientation, const QPointF &scenePos)
+{
+    if (!m_isBrushDragging || !m_hasLastBrushPoint) {
+        beginBrushStroke(orientation, scenePos);
+        return;
+    }
+
+    if (orientation != m_activeBrushOrientation) {
+        finishBrushStroke();
+        return;
+    }
+
+    const double radiusMm = m_brushRadiusSpinBox ? static_cast<double>(m_brushRadiusSpinBox->value()) : 1.0;
+    const double stepMm = std::max(0.5, radiusMm * 0.33);
+    const double distanceMm = std::hypot(scenePos.x() - m_lastBrushScenePoint.x(),
+                                         scenePos.y() - m_lastBrushScenePoint.y());
+    const int steps = std::max(1, static_cast<int>(std::ceil(distanceMm / stepMm)));
+    for (int i = 1; i <= steps; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(steps);
+        const QPointF interpolated(m_lastBrushScenePoint.x() * (1.0 - t) + scenePos.x() * t,
+                                   m_lastBrushScenePoint.y() * (1.0 - t) + scenePos.y() * t);
+        stampBrushAtScenePoint(orientation, interpolated);
+    }
+
+    m_activeBrushDistanceMm += distanceMm;
+    m_activeBrushStepMm = stepMm;
+    m_lastBrushScenePoint = scenePos;
+    updateMaskLayers(orientation);
+    updateBrushCursor(orientation, scenePos);
+}
+
+void CTViewerWidget::finishBrushStroke()
+{
+    if (!m_isBrushDragging && !m_hasLastBrushPoint) {
+        return;
+    }
+
+    m_isBrushDragging = false;
+    m_hasLastBrushPoint = false;
+    if (m_activeBrushOperation.changes.empty()) {
+        qInfo() << "Brush stroke no-op"
+                << "orientation=" << orientationName(m_activeBrushOrientation)
+                << "distance=" << m_activeBrushDistanceMm
+                << "radius=" << m_activeBrushOperation.radius
+                << "step=" << m_activeBrushStepMm
+                << "stamps=" << m_activeBrushStampCount
+                << "no-op voxels=" << m_activeBrushNoOpVoxels;
+        resetActiveBrushStroke();
+        return;
+    }
+
+    m_undoStack.push_back(m_activeBrushOperation);
+    m_redoStack.clear();
+    setMaskEditDirty(true);
+    updateSliceImages();
+
+    qInfo() << "Brush stroke"
+            << "orientation=" << orientationName(m_activeBrushOrientation)
+            << "distance=" << m_activeBrushDistanceMm
+            << "radius=" << m_activeBrushOperation.radius
+            << "step=" << m_activeBrushStepMm
+            << "stamps=" << m_activeBrushStampCount
+            << "changedVoxels=" << m_activeBrushOperation.changes.size()
+            << "changedHU130=" << m_activeBrushChangedVoxelsHU130
+            << "changed min HU=" << (m_activeBrushHasChangedHu ? m_activeBrushMinChangedHU : 0)
+            << "changed max HU=" << (m_activeBrushHasChangedHu ? m_activeBrushMaxChangedHU : 0)
+            << "newly added vs AI=" << m_activeBrushNewlyAddedVsAi
+            << "erased AI pixels=" << m_activeBrushErasedAiVoxels
+            << "no-op voxels=" << m_activeBrushNoOpVoxels
+            << "; ai_mask_v0 is read-only, changed workingMask only.";
+    if (m_activeBrushChangedVoxelsHU130 == 0) {
+        qInfo() << "Brush stroke changed mask, but no changed voxels are HU>=130; Agatston score may not change.";
+    }
+    resetActiveBrushStroke();
+}
+
+void CTViewerWidget::resetActiveBrushStroke()
+{
+    m_activeBrushOperation = {};
+    m_activeBrushChangeIndexByOffset.clear();
+    m_activeBrushDistanceMm = 0.0;
+    m_activeBrushStepMm = 0.0;
+    m_activeBrushStampCount = 0;
+    m_activeBrushChangedVoxelsHU130 = 0;
+    m_activeBrushNewlyAddedVsAi = 0;
+    m_activeBrushErasedAiVoxels = 0;
+    m_activeBrushNoOpVoxels = 0;
+    m_activeBrushMinChangedHU = 0;
+    m_activeBrushMaxChangedHU = 0;
+    m_activeBrushHasChangedHu = false;
+}
+
+bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos)
+{
+    if (!m_hasWorkingMask || !m_workingMask.hasSameDimensionsAs(m_volume)) {
+        return false;
+    }
+
+    int centerX = 0;
+    int centerY = 0;
+    int centerZ = 0;
+    if (!scenePointToVoxel(orientation, scenePos, &centerX, &centerY, &centerZ)) {
+        return false;
+    }
 
     const double spacingX = volumeSpacing(0);
     const double spacingY = volumeSpacing(1);
     const double spacingZ = volumeSpacing(2);
+    const double radiusMm = m_brushRadiusSpinBox ? static_cast<double>(m_brushRadiusSpinBox->value()) : 1.0;
+    const int targetValue = m_toolMode == ToolMode::BrushErase ? 0 : 1;
     const double radiusSquaredMm = radiusMm * radiusMm;
-    int changedVoxelsHU130 = 0;
-    int newlyAddedVsAi = 0;
-    int erasedAiVoxels = 0;
-    int noOpVoxels = 0;
-    int minChangedHU = 0;
-    int maxChangedHU = 0;
-    bool hasChangedHu = false;
+    bool changedAny = false;
+    ++m_activeBrushStampCount;
 
     const auto applyVoxel = [&](int x, int y, int z) {
         const uint8_t previousValue = m_workingMask.value(x, y, z);
         const uint8_t newValue = static_cast<uint8_t>(targetValue);
         if (previousValue == newValue) {
-            ++noOpVoxels;
+            ++m_activeBrushNoOpVoxels;
             return;
         }
 
         const int hu = m_volume.value(x, y, z);
-        if (!hasChangedHu) {
-            minChangedHU = hu;
-            maxChangedHU = hu;
-            hasChangedHu = true;
+        if (!m_activeBrushHasChangedHu) {
+            m_activeBrushMinChangedHU = hu;
+            m_activeBrushMaxChangedHU = hu;
+            m_activeBrushHasChangedHu = true;
         } else {
-            minChangedHU = std::min(minChangedHU, hu);
-            maxChangedHU = std::max(maxChangedHU, hu);
+            m_activeBrushMinChangedHU = std::min(m_activeBrushMinChangedHU, hu);
+            m_activeBrushMaxChangedHU = std::max(m_activeBrushMaxChangedHU, hu);
         }
         if (hu >= 130) {
-            ++changedVoxelsHU130;
+            ++m_activeBrushChangedVoxelsHU130;
         }
 
         if (m_hasMask && m_aiMask.hasSameDimensionsAs(m_volume)) {
             const uint8_t aiValue = m_aiMask.value(x, y, z);
             if (aiValue == 0 && newValue == 1) {
-                ++newlyAddedVsAi;
+                ++m_activeBrushNewlyAddedVsAi;
             } else if (aiValue == 1 && newValue == 0) {
-                ++erasedAiVoxels;
+                ++m_activeBrushErasedAiVoxels;
             }
         }
         m_workingMask.setValue(x, y, z, newValue);
-        operation.changes.push_back({x, y, z, previousValue, newValue});
+        mergeActiveBrushChange({x, y, z, previousValue, newValue});
+        changedAny = true;
     };
 
     switch (orientation) {
@@ -1266,38 +1410,21 @@ void CTViewerWidget::applyBrushAtScenePoint(ViewOrientation orientation, const Q
     }
     }
 
-    if (operation.changes.empty()) {
-        qInfo() << "Brush stamp no-op"
-                << "orientation=" << orientationName(orientation)
-                << "scene=(" << scenePos.x() << "," << scenePos.y()
-                << "), center voxel=(" << centerX << "," << centerY << "," << centerZ
-                << "), radiusMm=" << radiusMm
-                << "no-op voxels=" << noOpVoxels;
+    return changedAny;
+}
+
+void CTViewerWidget::mergeActiveBrushChange(const PixelChange &change)
+{
+    const size_t offset = m_workingMask.offset(change.x, change.y, change.z);
+    const auto existing = m_activeBrushChangeIndexByOffset.find(offset);
+    if (existing == m_activeBrushChangeIndexByOffset.end()) {
+        m_activeBrushChangeIndexByOffset.emplace(offset, m_activeBrushOperation.changes.size());
+        m_activeBrushOperation.changes.push_back(change);
         return;
     }
 
-    m_undoStack.push_back(operation);
-    m_redoStack.clear();
-    setMaskEditDirty(true);
-    updateSliceImages();
-
-    qInfo() << "Brush stamp applied"
-            << (operation.type == EditOperationType::BrushErase ? "BrushErase" : "BrushAdd")
-            << "orientation=" << orientationName(orientation)
-            << "scene=(" << scenePos.x() << "," << scenePos.y()
-            << "), center voxel=(" << centerX << "," << centerY << "," << centerZ
-            << "), radiusMm=" << radiusMm
-            << "changed voxels=" << operation.changes.size()
-            << "changed voxels HU>=130=" << changedVoxelsHU130
-            << "changed min HU=" << (hasChangedHu ? minChangedHU : 0)
-            << "changed max HU=" << (hasChangedHu ? maxChangedHU : 0)
-            << "newly added vs AI=" << newlyAddedVsAi
-            << "erased AI pixels=" << erasedAiVoxels
-            << "no-op voxels=" << noOpVoxels
-            << "; ai_mask_v0 is read-only, changed workingMask only.";
-    if (changedVoxelsHU130 == 0) {
-        qInfo() << "Brush stamp changed mask, but no changed voxels are HU>=130; Agatston score may not change.";
-    }
+    PixelChange &activeChange = m_activeBrushOperation.changes[existing->second];
+    activeChange.newValue = change.newValue;
 }
 
 void CTViewerWidget::applyEditOperation(const EditOperation &operation, bool useNewValues)

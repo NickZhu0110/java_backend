@@ -8,7 +8,6 @@
 #include "ui_mainwindow.h"
 
 #include <QFileDialog>
-#include <QBoxLayout>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QDateTime>
@@ -35,8 +34,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_backendConnected(false)
 {
     ui->setupUi(this);
-    embedCtViewer();
-    hideLegacyAnnotationPanel();
+    setupCtViewer();
     setupInitialState();
     connectSignals();
     loadMostRecentCaseCacheIfAvailable();
@@ -567,54 +565,27 @@ void MainWindow::openServerSettings()
     }
 }
 
-void MainWindow::embedCtViewer()
+void MainWindow::setupCtViewer()
 {
-    appendLog(QStringLiteral("Embedding CTViewerWidget into full DICOM placeholder frame"));
-
-    QWidget *viewerFrame = ui->dicomViewerPlaceholder;
-    if (!viewerFrame) {
-        appendLog(QStringLiteral("DICOM viewer placeholder frame not found; keeping existing UI."));
+    QWidget *viewerContainer = ui->ctViewerContainer;
+    if (!viewerContainer) {
+        appendLog(QStringLiteral("CT viewer container not found; viewer was not created."));
         return;
     }
 
-    QLayout *layout = viewerFrame->layout();
-    auto *boxLayout = qobject_cast<QBoxLayout *>(layout);
-    if (!layout || !boxLayout) {
-        appendLog(QStringLiteral("DICOM viewer placeholder layout not found; keeping existing UI."));
+    QLayout *layout = viewerContainer->layout();
+    if (!layout) {
+        appendLog(QStringLiteral("CT viewer container layout not found; viewer was not created."));
         return;
-    }
-
-    int removedCount = 0;
-    while (QLayoutItem *item = layout->takeAt(0)) {
-        if (QWidget *widget = item->widget()) {
-            widget->hide();
-            widget->deleteLater();
-        }
-        delete item;
-        ++removedCount;
     }
 
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    m_ctViewerWidget = new CTViewerWidget(viewerFrame);
+    m_ctViewerWidget = new CTViewerWidget(viewerContainer);
     m_ctViewerWidget->setObjectName(QStringLiteral("ctViewerWidget"));
-    boxLayout->addWidget(m_ctViewerWidget, 1);
-
-    appendLog(QStringLiteral("DICOM placeholder frame: %1").arg(viewerFrame->objectName()));
-    appendLog(QStringLiteral("Embedded CTViewerWidget into full DICOM placeholder frame; removed %1 old layout items.")
-                  .arg(removedCount));
-}
-
-void MainWindow::hideLegacyAnnotationPanel()
-{
-    if (!ui->annotationGroupBox) {
-        qInfo() << "Legacy annotation panel not found; nothing to hide.";
-        return;
-    }
-
-    ui->annotationGroupBox->hide();
-    qInfo() << "Legacy MainWindow annotation panel hidden; CTViewerWidget toolbar remains active.";
+    layout->addWidget(m_ctViewerWidget);
+    appendLog(QStringLiteral("CTViewerWidget attached to MainWindow viewer container."));
 }
 
 void MainWindow::prepareCaseCacheForInput(const QString &inputPath)

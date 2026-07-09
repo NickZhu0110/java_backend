@@ -44,8 +44,7 @@ private:
     void displayResult(const QJsonObject &result);
     void updateResultLabels(const QJsonObject &result);
     void openServerSettings();
-    void embedCtViewer();
-    void hideLegacyAnnotationPanel();
+    void setupCtViewer();
     void prepareCaseCacheForInput(const QString &inputPath);
     void handleJobResultFiles(const QJsonObject &result);
     void tryLoadCurrentCaseFromCache();

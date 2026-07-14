@@ -4,8 +4,23 @@ project(qt-cac-app LANGUAGES CXX)
 find_package(Qt6 6.5 REQUIRED COMPONENTS
     Core
     Widgets
+    OpenGLWidgets
     Network
     WebSockets
+)
+
+find_package(VTK REQUIRED COMPONENTS
+    CommonCore
+    CommonDataModel
+    FiltersCore
+    FiltersGeneral
+    FiltersSources
+    GUISupportQt
+    InteractionStyle
+    InteractionWidgets
+    RenderingAnnotation
+    RenderingCore
+    RenderingOpenGL2
 )
 
 qt_standard_project_setup()
@@ -34,6 +49,8 @@ qt_add_executable(qt-cac-app
     src/viewer/CTViewerWidget.cpp
     src/viewer/CTViewerWidget.h
     src/viewer/LoadedCaseVolume.h
+    src/viewer/Mask3DViewerWidget.cpp
+    src/viewer/Mask3DViewerWidget.h
     src/viewer/PythonSimpleItkPreprocessor.cpp
     src/viewer/PythonSimpleItkPreprocessor.h
     src/viewer/RawVolumeLoader.cpp
@@ -49,9 +66,18 @@ target_link_libraries(qt-cac-app
     PRIVATE
         Qt::Core
         Qt::Widgets
+        Qt::OpenGLWidgets
         Qt::Network
         Qt::WebSockets
+        ${VTK_LIBRARIES}
 )
+
+if (VTK_VERSION VERSION_GREATER_EQUAL "8.90.0")
+    vtk_module_autoinit(
+        TARGETS qt-cac-app
+        MODULES ${VTK_LIBRARIES}
+    )
+endif()
 
 install(TARGETS qt-cac-app
     BUNDLE  DESTINATION .

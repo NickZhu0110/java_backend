@@ -24,6 +24,9 @@
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
 
+class Mask3DViewerWidget;
+class QGridLayout;
+
 class CTViewerWidget : public QWidget
 {
     Q_OBJECT
@@ -61,6 +64,14 @@ private:
         Axial = 0,
         Coronal = 1,
         Sagittal = 2
+    };
+
+    enum class ViewportId {
+        None,
+        Axial,
+        ThreeD,
+        Coronal,
+        Sagittal
     };
 
     struct PixelChange {
@@ -132,10 +143,16 @@ private:
     void setupUi();
     void setVolumeAndMask(const VolumeData &volume, const MaskVolume &mask, bool hasMask);
     QWidget *createViewPanelWidget(ViewPanel &panel);
+    QWidget *create3DPanelWidget();
     void setupViewPanel(ViewPanel &panel, ViewOrientation orientation, const QString &title);
     ViewPanel &panel(ViewOrientation orientation);
     const ViewPanel &panel(ViewOrientation orientation) const;
     ViewPanel *panelForViewport(QObject *viewport);
+    ViewportId viewportIdForObject(QObject *object) const;
+    QWidget *panelForViewportId(ViewportId id) const;
+    void toggleViewportMaximized(ViewportId id);
+    void maximizeViewport(ViewportId id);
+    void restoreViewportGrid();
     QSize sliceImageSize(ViewOrientation orientation) const;
     MprSliceGeometry mprGeometry(ViewOrientation orientation) const;
     QSizeF sliceSceneSize(ViewOrientation orientation) const;
@@ -160,6 +177,7 @@ private:
     void resetAllViewsToFit();
     void updateZoomLabel(ViewOrientation orientation);
     void updateGlobalZoomLabel();
+    void refresh3DMaskSurface();
     void handleViewWheel(ViewOrientation orientation, QWheelEvent *event);
     void handleViewResized(ViewOrientation orientation);
     void updateToolState();
@@ -200,12 +218,21 @@ private:
     QPushButton *m_redoButton = nullptr;
     QPushButton *m_saveMaskButton = nullptr;
     QPushButton *m_fitAllButton = nullptr;
+    QPushButton *m_refresh3DButton = nullptr;
+    QPushButton *m_reset3DCameraButton = nullptr;
     QSpinBox *m_brushRadiusSpinBox = nullptr;
     QCheckBox *m_showAiMaskCheckBox = nullptr;
     QCheckBox *m_showWorkingMaskCheckBox = nullptr;
     QSlider *m_globalZoomSlider = nullptr;
     QLabel *m_globalZoomLabel = nullptr;
     QLabel *m_maskStatusLabel = nullptr;
+    Mask3DViewerWidget *m_mask3DViewer = nullptr;
+    QGridLayout *m_viewGridLayout = nullptr;
+    QWidget *m_axialPanel = nullptr;
+    QWidget *m_threeDPanel = nullptr;
+    QWidget *m_coronalPanel = nullptr;
+    QWidget *m_sagittalPanel = nullptr;
+    ViewportId m_maximizedViewport = ViewportId::None;
 
     VolumeData m_volume;
     // aiMask is original AI output and must never be modified. Edits apply only to workingMask.

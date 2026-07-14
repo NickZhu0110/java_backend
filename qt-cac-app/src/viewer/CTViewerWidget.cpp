@@ -1,6 +1,7 @@
 #include "viewer/CTViewerWidget.h"
 
 #include "viewer/CaseVolumeLoader.h"
+#include "viewer/Mask3DViewerWidget.h"
 
 #include <QButtonGroup>
 #include <QBrush>
@@ -111,6 +112,15 @@ bool CTViewerWidget::hasUnsavedEdits() const
 
 bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
 {
+    const ViewportId viewportId = viewportIdForObject(watched);
+    if (event->type() == QEvent::MouseButtonDblClick && viewportId != ViewportId::None) {
+        finishBrushStroke();
+        hideBrushCursor();
+        toggleViewportMaximized(viewportId);
+        event->accept();
+        return true;
+    }
+
     ViewPanel *eventPanel = panelForViewport(watched);
     if (!eventPanel) {
         return QWidget::eventFilter(watched, event);
@@ -265,6 +275,7 @@ void CTViewerWidget::createSyntheticStudy()
         viewPanel.sliceSlider->setValue(viewPanel.sliceIndex);
     }
     updateAllFitScales();
+    refresh3DMaskSurface();
 }
 
 void CTViewerWidget::setupUi()
@@ -295,7 +306,11 @@ void CTViewerWidget::setupUi()
     m_saveMaskButton->setToolTip(QStringLiteral("Save corrected mask"));
     m_fitAllButton = new QPushButton(QStringLiteral("Fit"), this);
     m_fitAllButton->setToolTip(QStringLiteral("Fit all views"));
-    for (QPushButton *button : {m_undoButton, m_redoButton, m_saveMaskButton, m_fitAllButton}) {
+    m_refresh3DButton = new QPushButton(QStringLiteral("Refresh 3D"), this);
+    m_refresh3DButton->setToolTip(QStringLiteral("Rebuild 3D mask surface from current working mask"));
+    m_reset3DCameraButton = new QPushButton(QStringLiteral("Reset Camera"), this);
+    m_reset3DCameraButton->setToolTip(QStringLiteral("Reset 3D camera"));
+    for (QPushButton *button : {m_undoButton, m_redoButton, m_saveMaskButton, m_fitAllButton, m_refresh3DButton, m_reset3DCameraButton}) {
         button->setMinimumWidth(58);
         button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     }
@@ -337,6 +352,9 @@ void CTViewerWidget::setupUi()
     toolLayout->addWidget(m_undoButton);
     toolLayout->addWidget(m_redoButton);
     toolLayout->addWidget(m_saveMaskButton);
+    toolLayout->addSpacing(8);
+    toolLayout->addWidget(m_refresh3DButton);
+    toolLayout->addWidget(m_reset3DCameraButton);
     toolLayout->addStretch(1);
 
     auto *zoomLayout = new QHBoxLayout;
@@ -351,23 +369,28 @@ void CTViewerWidget::setupUi()
     statusLayout->setContentsMargins(4, 0, 4, 4);
     statusLayout->addWidget(m_maskStatusLabel, 1);
 
-    auto *viewsLayout = new QGridLayout;
-    viewsLayout->setContentsMargins(4, 4, 4, 4);
-    viewsLayout->setSpacing(6);
-    viewsLayout->addWidget(createViewPanelWidget(panel(ViewOrientation::Axial)), 0, 0);
-    viewsLayout->addWidget(createViewPanelWidget(panel(ViewOrientation::Coronal)), 0, 1);
-    viewsLayout->addWidget(createViewPanelWidget(panel(ViewOrientation::Sagittal)), 0, 2);
-    viewsLayout->setColumnStretch(0, 1);
-    viewsLayout->setColumnStretch(1, 1);
-    viewsLayout->setColumnStretch(2, 1);
-    viewsLayout->setRowStretch(0, 1);
+    m_viewGridLayout = new QGridLayout;
+    m_viewGridLayout->setContentsMargins(4, 4, 4, 4);
+    m_viewGridLayout->setSpacing(6);
+    m_axialPanel = createViewPanelWidget(panel(ViewOrientation::Axial));
+    m_threeDPanel = create3DPanelWidget();
+    m_coronalPanel = createViewPanelWidget(panel(ViewOrientation::Coronal));
+    m_sagittalPanel = createViewPanelWidget(panel(ViewOrientation::Sagittal));
+    m_viewGridLayout->addWidget(m_axialPanel, 0, 0);
+    m_viewGridLayout->addWidget(m_threeDPanel, 0, 1);
+    m_viewGridLayout->addWidget(m_coronalPanel, 1, 0);
+    m_viewGridLayout->addWidget(m_sagittalPanel, 1, 1);
+    m_viewGridLayout->setColumnStretch(0, 1);
+    m_viewGridLayout->setColumnStretch(1, 1);
+    m_viewGridLayout->setRowStretch(0, 1);
+    m_viewGridLayout->setRowStretch(1, 1);
 
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->addLayout(toolLayout);
     mainLayout->addLayout(zoomLayout);
     mainLayout->addLayout(statusLayout);
-    mainLayout->addLayout(viewsLayout, 1);
+    mainLayout->addLayout(m_viewGridLayout, 1);
 
     for (ViewOrientation orientation : {ViewOrientation::Axial, ViewOrientation::Coronal, ViewOrientation::Sagittal}) {
         ViewPanel &viewPanel = panel(orientation);
@@ -415,6 +438,12 @@ void CTViewerWidget::setupUi()
         setGlobalZoomFactor(static_cast<double>(value) / 100.0);
     });
     connect(m_fitAllButton, &QPushButton::clicked, this, &CTViewerWidget::resetAllViewsToFit);
+    connect(m_refresh3DButton, &QPushButton::clicked, this, &CTViewerWidget::refresh3DMaskSurface);
+    connect(m_reset3DCameraButton, &QPushButton::clicked, this, [this]() {
+        if (m_mask3DViewer) {
+            m_mask3DViewer->resetCamera();
+        }
+    });
 
     updateToolState();
 }
@@ -459,6 +488,11 @@ QWidget *CTViewerWidget::createViewPanelWidget(ViewPanel &viewPanel)
 
     auto *titleLabel = new QLabel(viewPanel.title, container);
     titleLabel->setAlignment(Qt::AlignCenter);
+    container->setToolTip(QStringLiteral("Double-click to maximize/restore"));
+    titleLabel->setToolTip(container->toolTip());
+    viewPanel.view->setToolTip(container->toolTip());
+    container->installEventFilter(this);
+    titleLabel->installEventFilter(this);
 
     auto *sliceLayout = new QHBoxLayout;
     sliceLayout->setContentsMargins(0, 0, 0, 0);
@@ -473,6 +507,34 @@ QWidget *CTViewerWidget::createViewPanelWidget(ViewPanel &viewPanel)
     layout->addWidget(titleLabel);
     layout->addWidget(viewPanel.view, 1);
     layout->addLayout(sliceLayout);
+    return container;
+}
+
+QWidget *CTViewerWidget::create3DPanelWidget()
+{
+    auto *container = new QFrame(this);
+    container->setFrameShape(QFrame::StyledPanel);
+    container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    auto *titleLabel = new QLabel(QStringLiteral("3D"), container);
+    titleLabel->setAlignment(Qt::AlignCenter);
+    container->setToolTip(QStringLiteral("Double-click to maximize/restore"));
+    titleLabel->setToolTip(container->toolTip());
+    container->installEventFilter(this);
+    titleLabel->installEventFilter(this);
+
+    m_mask3DViewer = new Mask3DViewerWidget(container);
+    m_mask3DViewer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_mask3DViewer->setToolTip(container->toolTip());
+    connect(m_mask3DViewer, &Mask3DViewerWidget::viewportDoubleClicked, this, [this]() {
+        toggleViewportMaximized(ViewportId::ThreeD);
+    });
+
+    auto *layout = new QVBoxLayout(container);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+    layout->addWidget(titleLabel);
+    layout->addWidget(m_mask3DViewer, 1);
     return container;
 }
 
@@ -494,6 +556,113 @@ CTViewerWidget::ViewPanel *CTViewerWidget::panelForViewport(QObject *viewport)
         }
     }
     return nullptr;
+}
+
+CTViewerWidget::ViewportId CTViewerWidget::viewportIdForObject(QObject *object) const
+{
+    for (QObject *current = object; current; current = current->parent()) {
+        if (current == m_axialPanel) {
+            return ViewportId::Axial;
+        }
+        if (current == m_threeDPanel) {
+            return ViewportId::ThreeD;
+        }
+        if (current == m_coronalPanel) {
+            return ViewportId::Coronal;
+        }
+        if (current == m_sagittalPanel) {
+            return ViewportId::Sagittal;
+        }
+    }
+    return ViewportId::None;
+}
+
+QWidget *CTViewerWidget::panelForViewportId(ViewportId id) const
+{
+    switch (id) {
+    case ViewportId::Axial:
+        return m_axialPanel;
+    case ViewportId::ThreeD:
+        return m_threeDPanel;
+    case ViewportId::Coronal:
+        return m_coronalPanel;
+    case ViewportId::Sagittal:
+        return m_sagittalPanel;
+    case ViewportId::None:
+        return nullptr;
+    }
+    return nullptr;
+}
+
+void CTViewerWidget::toggleViewportMaximized(ViewportId id)
+{
+    if (id == ViewportId::None || !m_viewGridLayout) {
+        return;
+    }
+    if (m_maximizedViewport == id) {
+        restoreViewportGrid();
+    } else {
+        maximizeViewport(id);
+    }
+}
+
+void CTViewerWidget::maximizeViewport(ViewportId id)
+{
+    QWidget *targetPanel = panelForViewportId(id);
+    if (!m_viewGridLayout || !targetPanel) {
+        return;
+    }
+
+    const std::array<QWidget *, 4> panels = {
+        m_axialPanel, m_threeDPanel, m_coronalPanel, m_sagittalPanel
+    };
+    for (QWidget *panelWidget : panels) {
+        if (!panelWidget) {
+            continue;
+        }
+        m_viewGridLayout->removeWidget(panelWidget);
+        panelWidget->setVisible(panelWidget == targetPanel);
+    }
+
+    m_viewGridLayout->addWidget(targetPanel, 0, 0, 2, 2);
+    targetPanel->show();
+    m_maximizedViewport = id;
+    m_viewGridLayout->invalidate();
+    updateGeometry();
+}
+
+void CTViewerWidget::restoreViewportGrid()
+{
+    if (!m_viewGridLayout) {
+        return;
+    }
+
+    const std::array<QWidget *, 4> panels = {
+        m_axialPanel, m_threeDPanel, m_coronalPanel, m_sagittalPanel
+    };
+    for (QWidget *panelWidget : panels) {
+        if (panelWidget) {
+            m_viewGridLayout->removeWidget(panelWidget);
+        }
+    }
+
+    m_viewGridLayout->addWidget(m_axialPanel, 0, 0);
+    m_viewGridLayout->addWidget(m_threeDPanel, 0, 1);
+    m_viewGridLayout->addWidget(m_coronalPanel, 1, 0);
+    m_viewGridLayout->addWidget(m_sagittalPanel, 1, 1);
+    for (QWidget *panelWidget : panels) {
+        if (panelWidget) {
+            panelWidget->show();
+        }
+    }
+
+    m_viewGridLayout->setColumnStretch(0, 1);
+    m_viewGridLayout->setColumnStretch(1, 1);
+    m_viewGridLayout->setRowStretch(0, 1);
+    m_viewGridLayout->setRowStretch(1, 1);
+    m_maximizedViewport = ViewportId::None;
+    m_viewGridLayout->invalidate();
+    updateGeometry();
 }
 
 QSize CTViewerWidget::sliceImageSize(ViewOrientation orientation) const
@@ -768,6 +937,22 @@ void CTViewerWidget::updateGlobalZoomLabel()
     m_globalZoomLabel->setText(QStringLiteral("Global %1x").arg(static_cast<double>(m_globalZoomSlider->value()) / 100.0, 0, 'f', 2));
 }
 
+void CTViewerWidget::refresh3DMaskSurface()
+{
+    if (!m_mask3DViewer) {
+        return;
+    }
+    if (m_hasWorkingMask && m_workingMask.isValid()) {
+        m_mask3DViewer->refreshFromMask(m_workingMask);
+        return;
+    }
+    if (m_hasMask && m_aiMask.isValid()) {
+        m_mask3DViewer->refreshFromMask(m_aiMask);
+        return;
+    }
+    m_mask3DViewer->clear();
+}
+
 void CTViewerWidget::handleViewWheel(ViewOrientation orientation, QWheelEvent *event)
 {
     if (!event) {
@@ -838,6 +1023,7 @@ void CTViewerWidget::setVolumeAndMask(const VolumeData &volume, const MaskVolume
     updateSliceImages();
     updateSliceLabel();
     updateAllFitScales();
+    refresh3DMaskSurface();
 
     if (!m_hasMask && hasMask) {
         qWarning() << "Loaded mask is not geometry-compatible with CT; overlay disabled.";
@@ -1751,6 +1937,7 @@ bool CTViewerWidget::saveCorrectedMask()
             << "workingMask checksum:" << checksumString(diagnostics.checksum)
             << "; ai_mask_v0.nrrd was not overwritten.";
     emit correctedMaskSaved(version, rawPath, metadataPath);
+    refresh3DMaskSurface();
     return true;
 }
 

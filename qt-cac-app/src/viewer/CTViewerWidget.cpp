@@ -526,6 +526,32 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_mask3DViewer = new Mask3DViewerWidget(container);
     m_mask3DViewer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_mask3DViewer->setToolTip(container->toolTip());
+
+    auto *opacityLabel = new QLabel(QStringLiteral("Opacity"), container);
+    m_3DSurfaceOpacitySlider = new QSlider(Qt::Horizontal, container);
+    m_3DSurfaceOpacitySlider->setRange(0, 100);
+    m_3DSurfaceOpacitySlider->setValue(90);
+    m_3DSurfaceOpacitySlider->setMinimumWidth(90);
+    m_3DSurfaceOpacitySlider->setToolTip(QStringLiteral("3D mask surface opacity"));
+    m_3DSurfaceOpacityLabel = new QLabel(QStringLiteral("90%"), container);
+    m_3DSurfaceOpacityLabel->setMinimumWidth(38);
+    m_3DSurfaceOpacityLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    auto *opacityLayout = new QHBoxLayout;
+    opacityLayout->setContentsMargins(4, 0, 4, 0);
+    opacityLayout->setSpacing(6);
+    opacityLayout->addWidget(opacityLabel);
+    opacityLayout->addWidget(m_3DSurfaceOpacitySlider, 1);
+    opacityLayout->addWidget(m_3DSurfaceOpacityLabel);
+
+    connect(m_3DSurfaceOpacitySlider, &QSlider::valueChanged, this, [this](int value) {
+        if (m_3DSurfaceOpacityLabel) {
+            m_3DSurfaceOpacityLabel->setText(QStringLiteral("%1%").arg(value));
+        }
+        if (m_mask3DViewer) {
+            m_mask3DViewer->setSurfaceOpacity(static_cast<double>(value) / 100.0);
+        }
+    });
     connect(m_mask3DViewer, &Mask3DViewerWidget::viewportDoubleClicked, this, [this]() {
         toggleViewportMaximized(ViewportId::ThreeD);
     });
@@ -535,6 +561,7 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     layout->setSpacing(4);
     layout->addWidget(titleLabel);
     layout->addWidget(m_mask3DViewer, 1);
+    layout->addLayout(opacityLayout);
     return container;
 }
 

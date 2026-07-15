@@ -227,6 +227,8 @@ private:
     QLabel *m_globalZoomLabel = nullptr;
     QLabel *m_maskStatusLabel = nullptr;
     Mask3DViewerWidget *m_mask3DViewer = nullptr;
+    QSlider *m_3DSurfaceOpacitySlider = nullptr;
+    QLabel *m_3DSurfaceOpacityLabel = nullptr;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
     QWidget *m_threeDPanel = nullptr;

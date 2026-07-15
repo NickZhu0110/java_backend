@@ -11,10 +11,8 @@
 
 #include <vtkActor.h>
 #include <vtkAnnotatedCubeActor.h>
-#include <vtkAxesActor.h>
 #include <vtkCamera.h>
 #include <vtkCommand.h>
-#include <vtkCubeSource.h>
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkImageData.h>
@@ -22,6 +20,8 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkOrientationMarkerWidget.h>
+#include <vtkOutlineSource.h>
+#include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindowInteractor.h>
@@ -129,6 +129,22 @@ double originValue(const MaskVolume &mask, int axis)
     return 0.0;
 }
 
+bool boundsAreValid(const double bounds[6])
+{
+    return std::all_of(bounds, bounds + 6, [](double value) {
+        return std::isfinite(value);
+    }) && bounds[0] <= bounds[1]
+        && bounds[2] <= bounds[3]
+        && bounds[4] <= bounds[5];
+}
+
+const char *anatomicalLabel(int physicalAxis, bool positive)
+{
+    static constexpr const char *positiveLabels[3] = {"L", "P", "S"};
+    static constexpr const char *negativeLabels[3] = {"R", "A", "I"};
+    return positive ? positiveLabels[physicalAxis] : negativeLabels[physicalAxis];
+}
+
 } // namespace
 
 Mask3DViewerWidget::Mask3DViewerWidget(QWidget *parent)
@@ -159,12 +175,9 @@ void Mask3DViewerWidget::setupOrientationMarker()
     }
 
     m_orientationCube = vtkSmartPointer<vtkAnnotatedCubeActor>::New();
-    m_orientationCube->SetXPlusFaceText("+X");
-    m_orientationCube->SetXMinusFaceText("-X");
-    m_orientationCube->SetYPlusFaceText("+Y");
-    m_orientationCube->SetYMinusFaceText("-Y");
-    m_orientationCube->SetZPlusFaceText("+Z");
-    m_orientationCube->SetZMinusFaceText("-Z");
+    static constexpr const char *plusLabels[3] = {"+X", "+Y", "+Z"};
+    static constexpr const char *minusLabels[3] = {"-X", "-Y", "-Z"};
+    setOrientationLabels(plusLabels, minusLabels);
     m_orientationCube->SetFaceTextScale(0.55);
     m_orientationCube->SetTextEdgesVisibility(1);
     m_orientationCube->GetCubeProperty()->SetColor(0.72, 0.74, 0.78);
@@ -186,43 +199,115 @@ void Mask3DViewerWidget::setupOrientationMarker()
     m_orientationMarker->InteractiveOff();
 }
 
+void Mask3DViewerWidget::setOrientationLabels(const char *const plusLabels[3],
+                                               const char *const minusLabels[3])
+{
+    if (!m_orientationCube) {
+        return;
+    }
+
+    m_orientationCube->SetXPlusFaceText(plusLabels[0]);
+    m_orientationCube->SetXMinusFaceText(minusLabels[0]);
+    m_orientationCube->SetYPlusFaceText(plusLabels[1]);
+    m_orientationCube->SetYMinusFaceText(minusLabels[1]);
+    m_orientationCube->SetZPlusFaceText(plusLabels[2]);
+    m_orientationCube->SetZMinusFaceText(minusLabels[2]);
+}
+
+void Mask3DViewerWidget::updateOrientationLabels(const MaskVolume &mask)
+{
+    static constexpr const char *fallbackPlus[3] = {"+X", "+Y", "+Z"};
+    static constexpr const char *fallbackMinus[3] = {"-X", "-Y", "-Z"};
+    if (mask.direction.size() != 9) {
+        setOrientationLabels(fallbackPlus, fallbackMinus);
+        qWarning() << "Medical orientation labels unavailable: mask direction matrix is missing.";
+        return;
+    }
+
+    const char *plusLabels[3] = {};
+    const char *minusLabels[3] = {};
+    bool usedPhysicalAxes[3] = {false, false, false};
+    for (int modelAxis = 0; modelAxis < 3; ++modelAxis) {
+        int physicalAxis = 0;
+        double dominantMagnitude = 0.0;
+        for (int row = 0; row < 3; ++row) {
+            const double component = mask.direction[static_cast<size_t>(row * 3 + modelAxis)];
+            if (!std::isfinite(component)) {
+                setOrientationLabels(fallbackPlus, fallbackMinus);
+                qWarning() << "Medical orientation labels unavailable: mask direction matrix is invalid.";
+                return;
+            }
+            if (std::abs(component) > dominantMagnitude) {
+                dominantMagnitude = std::abs(component);
+                physicalAxis = row;
+            }
+        }
+
+        if (dominantMagnitude < 0.999 || usedPhysicalAxes[physicalAxis]) {
+            setOrientationLabels(fallbackPlus, fallbackMinus);
+            qWarning() << "Medical orientation labels unavailable: rendered axes are oblique or ambiguous.";
+            return;
+        }
+        for (int row = 0; row < 3; ++row) {
+            if (row != physicalAxis
+                && std::abs(mask.direction[static_cast<size_t>(row * 3 + modelAxis)]) > 0.001) {
+                setOrientationLabels(fallbackPlus, fallbackMinus);
+                qWarning() << "Medical orientation labels unavailable: rendered axes are oblique.";
+                return;
+            }
+        }
+
+        usedPhysicalAxes[physicalAxis] = true;
+        const bool plusIsPhysicalPositive = mask.direction[static_cast<size_t>(physicalAxis * 3 + modelAxis)] > 0.0;
+        plusLabels[modelAxis] = anatomicalLabel(physicalAxis, plusIsPhysicalPositive);
+        minusLabels[modelAxis] = anatomicalLabel(physicalAxis, !plusIsPhysicalPositive);
+    }
+
+    setOrientationLabels(plusLabels, minusLabels);
+    qInfo() << "Verified medical orientation labels:"
+            << "+X=" << plusLabels[0] << "-X=" << minusLabels[0]
+            << "+Y=" << plusLabels[1] << "-Y=" << minusLabels[1]
+            << "+Z=" << plusLabels[2] << "-Z=" << minusLabels[2];
+}
+
 void Mask3DViewerWidget::clearVolumeBoundsGuide()
 {
     if (m_boundsActor) {
         m_renderer->RemoveActor(m_boundsActor);
         m_boundsActor = nullptr;
     }
-    if (m_sceneAxes) {
-        m_renderer->RemoveActor(m_sceneAxes);
-        m_sceneAxes = nullptr;
-    }
+    m_hasSurfaceFrameBounds = false;
 }
 
-void Mask3DViewerWidget::updateVolumeBoundsGuide(const MaskVolume &mask)
+void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
 {
     clearVolumeBoundsGuide();
-    if (!mask.isValid()) {
+    if (!boundsAreValid(surfaceBounds)) {
         return;
     }
 
-    const double spacingX = spacingValue(mask, 0);
-    const double spacingY = spacingValue(mask, 1);
-    const double spacingZ = spacingValue(mask, 2);
-    const double sizeX = static_cast<double>(mask.width) * spacingX;
-    const double sizeY = static_cast<double>(mask.height) * spacingY;
-    const double sizeZ = static_cast<double>(mask.depth) * spacingZ;
+    const double sizeX = surfaceBounds[1] - surfaceBounds[0];
+    const double sizeY = surfaceBounds[3] - surfaceBounds[2];
+    const double sizeZ = surfaceBounds[5] - surfaceBounds[4];
+    const double largestDimension = std::max({sizeX, sizeY, sizeZ});
+    constexpr double marginRatio = 0.08;
+    constexpr double minimumCubeSideLength = 1.0;
+    const double cubeSideLength = std::max(largestDimension * (1.0 + 2.0 * marginRatio),
+                                           minimumCubeSideLength);
+    const double halfSide = cubeSideLength * 0.5;
+    const double centerX = (surfaceBounds[0] + surfaceBounds[1]) * 0.5;
+    const double centerY = (surfaceBounds[2] + surfaceBounds[3]) * 0.5;
+    const double centerZ = (surfaceBounds[4] + surfaceBounds[5]) * 0.5;
+    m_surfaceFrameBounds[0] = centerX - halfSide;
+    m_surfaceFrameBounds[1] = centerX + halfSide;
+    m_surfaceFrameBounds[2] = centerY - halfSide;
+    m_surfaceFrameBounds[3] = centerY + halfSide;
+    m_surfaceFrameBounds[4] = centerZ - halfSide;
+    m_surfaceFrameBounds[5] = centerZ + halfSide;
+    m_hasSurfaceFrameBounds = true;
 
-    // vtkImageData stores voxel-center coordinates. Extending half a spacing
-    // outside the first/last centers gives the physical N * spacing volume.
-    const double centerX = originValue(mask, 0) + (static_cast<double>(mask.width) - 1.0) * spacingX * 0.5;
-    const double centerY = originValue(mask, 1) + (static_cast<double>(mask.height) - 1.0) * spacingY * 0.5;
-    const double centerZ = originValue(mask, 2) + (static_cast<double>(mask.depth) - 1.0) * spacingZ * 0.5;
-
-    vtkNew<vtkCubeSource> boundsSource;
-    boundsSource->SetCenter(centerX, centerY, centerZ);
-    boundsSource->SetXLength(sizeX);
-    boundsSource->SetYLength(sizeY);
-    boundsSource->SetZLength(sizeZ);
+    vtkNew<vtkOutlineSource> boundsSource;
+    boundsSource->SetBounds(m_surfaceFrameBounds);
 
     vtkNew<vtkPolyDataMapper> boundsMapper;
     boundsMapper->SetInputConnection(boundsSource->GetOutputPort());
@@ -230,30 +315,21 @@ void Mask3DViewerWidget::updateVolumeBoundsGuide(const MaskVolume &mask)
 
     m_boundsActor = vtkSmartPointer<vtkActor>::New();
     m_boundsActor->SetMapper(boundsMapper);
-    m_boundsActor->GetProperty()->SetColor(0.82, 0.84, 0.88);
-    m_boundsActor->GetProperty()->SetOpacity(0.05);
-    m_boundsActor->GetProperty()->EdgeVisibilityOn();
-    m_boundsActor->GetProperty()->SetEdgeColor(0.82, 0.84, 0.88);
-    m_boundsActor->GetProperty()->SetEdgeOpacity(0.45);
+    m_boundsActor->GetProperty()->SetColor(0.72, 0.75, 0.80);
+    m_boundsActor->GetProperty()->SetOpacity(0.38);
     m_boundsActor->GetProperty()->SetLineWidth(1.25);
     m_renderer->AddActor(m_boundsActor);
 
-    const double minX = centerX - sizeX * 0.5;
-    const double minY = centerY - sizeY * 0.5;
-    const double minZ = centerZ - sizeZ * 0.5;
-    const double axisLength = std::max({sizeX, sizeY, sizeZ}) * 0.16;
-    m_sceneAxes = vtkSmartPointer<vtkAxesActor>::New();
-    m_sceneAxes->SetPosition(minX, minY, minZ);
-    m_sceneAxes->SetTotalLength(axisLength, axisLength, axisLength);
-    m_sceneAxes->SetNormalizedShaftLength(0.78, 0.78, 0.78);
-    m_sceneAxes->SetNormalizedTipLength(0.22, 0.22, 0.22);
-    m_sceneAxes->SetShaftTypeToCylinder();
-    m_sceneAxes->AxisLabelsOn();
-    m_renderer->AddActor(m_sceneAxes);
+    qInfo() << "3D CAC guide cube center=" << centerX << centerY << centerZ
+            << "side lengths=" << cubeSideLength << cubeSideLength << cubeSideLength
+            << "margin ratio=" << marginRatio;
 
     if constexpr (kVerbose3DLogs) {
-        qDebug() << "3D volume bounds guide size=" << sizeX << sizeY << sizeZ
-                 << "center=" << centerX << centerY << centerZ;
+        qDebug() << "3D model bounds guide surface="
+                 << surfaceBounds[0] << surfaceBounds[1]
+                 << surfaceBounds[2] << surfaceBounds[3]
+                 << surfaceBounds[4] << surfaceBounds[5]
+                 << "cube side=" << cubeSideLength;
     }
 }
 
@@ -431,15 +507,12 @@ void Mask3DViewerWidget::resetCamera()
 
     double bounds[6];
     m_maskActor->GetBounds(bounds);
-    const bool validBounds = std::all_of(std::begin(bounds), std::end(bounds), [](double value) {
-        return std::isfinite(value);
-    }) && bounds[0] <= bounds[1]
-        && bounds[2] <= bounds[3]
-        && bounds[4] <= bounds[5];
-    if (!validBounds) {
+    if (!boundsAreValid(bounds)) {
         qWarning() << "Reset 3D camera skipped: mask actor bounds are invalid.";
         return;
     }
+
+    const double *frameBounds = m_hasSurfaceFrameBounds ? m_surfaceFrameBounds : bounds;
 
     vtkCamera *camera = renderer->GetActiveCamera();
     if (!camera) {
@@ -452,9 +525,9 @@ void Mask3DViewerWidget::resetCamera()
     m_rightButtonDown = false;
     forceEndInteraction();
 
-    const double centerX = (bounds[0] + bounds[1]) * 0.5;
-    const double centerY = (bounds[2] + bounds[3]) * 0.5;
-    const double centerZ = (bounds[4] + bounds[5]) * 0.5;
+    const double centerX = (frameBounds[0] + frameBounds[1]) * 0.5;
+    const double centerY = (frameBounds[2] + frameBounds[3]) * 0.5;
+    const double centerZ = (frameBounds[4] + frameBounds[5]) * 0.5;
 
     // ResetCamera fits bounds but preserves view direction, so restore a known
     // isometric direction first to make Reset Camera visually deterministic.
@@ -463,7 +536,7 @@ void Mask3DViewerWidget::resetCamera()
     camera->SetViewUp(0.0, 0.0, 1.0);
     camera->OrthogonalizeViewUp();
 
-    renderer->ResetCamera(bounds);
+    renderer->ResetCamera(frameBounds);
     renderer->ResetCameraClippingRange();
     renderWindow->Render();
 
@@ -480,6 +553,20 @@ void Mask3DViewerWidget::setMaskVolume(const MaskVolume &mask)
     refreshFromMask(mask);
 }
 
+void Mask3DViewerWidget::setSurfaceOpacity(double opacity)
+{
+    m_surfaceOpacity = std::clamp(opacity, 0.0, 1.0);
+    if (m_maskActor) {
+        m_maskActor->GetProperty()->SetOpacity(m_surfaceOpacity);
+        m_renderWindow->Render();
+    }
+}
+
+double Mask3DViewerWidget::surfaceOpacity() const
+{
+    return m_surfaceOpacity;
+}
+
 void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
 {
     if (!mask.isValid()) {
@@ -487,6 +574,8 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
         clear();
         return;
     }
+
+    updateOrientationLabels(mask);
 
     qsizetype nonzeroCount = 0;
     for (uint8_t value : mask.voxels) {
@@ -520,6 +609,20 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     surfaceExtractor->GenerateValues(1, 1, 1);
     surfaceExtractor->Update();
 
+    vtkPolyData *surface = surfaceExtractor->GetOutput();
+    if (!surface || surface->GetNumberOfPoints() == 0 || surface->GetNumberOfCells() == 0) {
+        qWarning() << "Mask3DViewerWidget: extracted surface is empty; clearing 3D surface.";
+        clear();
+        return;
+    }
+    double surfaceBounds[6];
+    surface->GetBounds(surfaceBounds);
+    if (!boundsAreValid(surfaceBounds)) {
+        qWarning() << "Mask3DViewerWidget: extracted surface bounds are invalid; clearing 3D surface.";
+        clear();
+        return;
+    }
+
     vtkNew<vtkPolyDataMapper> mapper;
     mapper->SetInputConnection(surfaceExtractor->GetOutputPort());
     mapper->ScalarVisibilityOff();
@@ -527,7 +630,7 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     vtkNew<vtkActor> actor;
     actor->SetMapper(mapper);
     actor->GetProperty()->SetColor(1.0, 0.72, 0.05);
-    actor->GetProperty()->SetOpacity(0.70);
+    actor->GetProperty()->SetOpacity(m_surfaceOpacity);
     actor->GetProperty()->SetSpecular(0.18);
     actor->GetProperty()->SetSpecularPower(18.0);
 
@@ -536,7 +639,7 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     }
     m_maskActor = actor;
     m_renderer->AddActor(m_maskActor);
-    updateVolumeBoundsGuide(mask);
+    updateModelBoundsGuide(surfaceBounds);
 
     const bool firstRenderedMask = !m_hasRenderedMask;
     m_hasRenderedMask = true;

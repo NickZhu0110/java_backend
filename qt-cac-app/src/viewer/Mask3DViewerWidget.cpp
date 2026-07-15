@@ -12,6 +12,7 @@
 #include <vtkActor.h>
 #include <vtkAnnotatedCubeActor.h>
 #include <vtkCamera.h>
+#include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkGenericOpenGLRenderWindow.h>
@@ -47,12 +48,40 @@ public:
     void OnLeftButtonDown() override
     {
         m_leftButtonDown = true;
+        const bool shiftPressed = m_shiftLeftPanRequested
+            || (this->Interactor && this->Interactor->GetShiftKey());
+        m_shiftLeftPanRequested = false;
+        if (shiftPressed && this->Interactor) {
+            const int *eventPosition = this->Interactor->GetEventPosition();
+            this->FindPokedRenderer(eventPosition[0], eventPosition[1]);
+            if (!this->CurrentRenderer) {
+                m_leftButtonDown = false;
+                return;
+            }
+
+            m_shiftLeftPanActive = true;
+            this->GrabFocus(this->EventCallbackCommand);
+            this->StartPan();
+            return;
+        }
         Superclass::OnLeftButtonDown();
     }
 
     void OnLeftButtonUp() override
     {
         m_leftButtonDown = false;
+        if (m_shiftLeftPanActive) {
+            if (this->State == VTKIS_PAN) {
+                this->EndPan();
+            }
+            if (this->Interactor) {
+                this->ReleaseFocus();
+            }
+            m_shiftLeftPanActive = false;
+            m_shiftLeftPanRequested = false;
+            return;
+        }
+        m_shiftLeftPanRequested = false;
         Superclass::OnLeftButtonUp();
     }
 
@@ -89,9 +118,14 @@ public:
         m_middleButtonDown = false;
         m_rightButtonDown = false;
 
-        Superclass::OnLeftButtonUp();
+        this->OnLeftButtonUp();
         Superclass::OnMiddleButtonUp();
         Superclass::OnRightButtonUp();
+    }
+
+    void setShiftLeftPanRequested(bool requested)
+    {
+        m_shiftLeftPanRequested = requested;
     }
 
 private:
@@ -103,6 +137,8 @@ private:
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;
     bool m_rightButtonDown = false;
+    bool m_shiftLeftPanRequested = false;
+    bool m_shiftLeftPanActive = false;
 };
 
 vtkStandardNewMacro(StrictTrackballCameraStyle);
@@ -378,6 +414,10 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {
             m_leftButtonDown = true;
+            if (m_interactorStyle) {
+                m_interactorStyle->setShiftLeftPanRequested(
+                    mouseEvent->modifiers().testFlag(Qt::ShiftModifier));
+            }
         } else if (mouseEvent->button() == Qt::MiddleButton) {
             m_middleButtonDown = true;
         } else if (mouseEvent->button() == Qt::RightButton) {

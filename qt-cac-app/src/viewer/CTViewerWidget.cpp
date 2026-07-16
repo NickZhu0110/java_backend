@@ -219,11 +219,17 @@ void CTViewerWidget::createSyntheticStudy()
     m_volume.width = width;
     m_volume.height = height;
     m_volume.depth = depth;
+    m_volume.direction = {1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0};
     m_volume.huVoxels.assign(static_cast<size_t>(width * height * depth), -950);
 
     m_aiMask.width = width;
     m_aiMask.height = height;
     m_aiMask.depth = depth;
+    m_aiMask.spacing = m_volume.spacing;
+    m_aiMask.origin = m_volume.origin;
+    m_aiMask.direction = m_volume.direction;
     m_aiMask.voxels.assign(static_cast<size_t>(width * height * depth), 0);
     m_workingMask = {};
     m_hasMask = true;
@@ -275,6 +281,7 @@ void CTViewerWidget::createSyntheticStudy()
         viewPanel.sliceSlider->setValue(viewPanel.sliceIndex);
     }
     updateAllFitScales();
+    configure3DCtPlanes();
     refresh3DMaskSurface();
 }
 
@@ -536,6 +543,12 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_3DSurfaceOpacityLabel = new QLabel(QStringLiteral("90%"), container);
     m_3DSurfaceOpacityLabel->setMinimumWidth(38);
     m_3DSurfaceOpacityLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_showAxial3DPlaneCheckBox = new QCheckBox(QStringLiteral("Axial Plane"), container);
+    m_showCoronal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Coronal Plane"), container);
+    m_showSagittal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Sagittal Plane"), container);
+    m_showAxial3DPlaneCheckBox->setChecked(true);
+    m_showCoronal3DPlaneCheckBox->setChecked(false);
+    m_showSagittal3DPlaneCheckBox->setChecked(false);
 
     auto *opacityLayout = new QHBoxLayout;
     opacityLayout->setContentsMargins(4, 0, 4, 0);
@@ -543,6 +556,9 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     opacityLayout->addWidget(opacityLabel);
     opacityLayout->addWidget(m_3DSurfaceOpacitySlider, 1);
     opacityLayout->addWidget(m_3DSurfaceOpacityLabel);
+    opacityLayout->addWidget(m_showAxial3DPlaneCheckBox);
+    opacityLayout->addWidget(m_showCoronal3DPlaneCheckBox);
+    opacityLayout->addWidget(m_showSagittal3DPlaneCheckBox);
 
     connect(m_3DSurfaceOpacitySlider, &QSlider::valueChanged, this, [this](int value) {
         if (m_3DSurfaceOpacityLabel) {
@@ -555,6 +571,12 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     connect(m_mask3DViewer, &Mask3DViewerWidget::viewportDoubleClicked, this, [this]() {
         toggleViewportMaximized(ViewportId::ThreeD);
     });
+    connect(m_showAxial3DPlaneCheckBox, &QCheckBox::toggled,
+            m_mask3DViewer, &Mask3DViewerWidget::setAxialPlaneVisible);
+    connect(m_showCoronal3DPlaneCheckBox, &QCheckBox::toggled,
+            m_mask3DViewer, &Mask3DViewerWidget::setCoronalPlaneVisible);
+    connect(m_showSagittal3DPlaneCheckBox, &QCheckBox::toggled,
+            m_mask3DViewer, &Mask3DViewerWidget::setSagittalPlaneVisible);
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(4, 4, 4, 4);
@@ -819,6 +841,7 @@ void CTViewerWidget::setSliceIndex(ViewOrientation orientation, int sliceIndex)
     }
     updateSliceImages(orientation);
     updateSliceLabel(orientation);
+    update3DPlaneSlice(orientation, clampedSlice);
 }
 
 void CTViewerWidget::updateAllSceneRects()
@@ -964,6 +987,35 @@ void CTViewerWidget::updateGlobalZoomLabel()
     m_globalZoomLabel->setText(QStringLiteral("Global %1x").arg(static_cast<double>(m_globalZoomSlider->value()) / 100.0, 0, 'f', 2));
 }
 
+void CTViewerWidget::configure3DCtPlanes()
+{
+    if (!m_mask3DViewer || !m_volume.isValid()) {
+        return;
+    }
+    m_mask3DViewer->setCtVolume(m_volume, m_windowWidth, m_windowLevel);
+    m_mask3DViewer->setAxialSlice(panel(ViewOrientation::Axial).sliceIndex);
+    m_mask3DViewer->setCoronalSlice(panel(ViewOrientation::Coronal).sliceIndex);
+    m_mask3DViewer->setSagittalSlice(panel(ViewOrientation::Sagittal).sliceIndex);
+}
+
+void CTViewerWidget::update3DPlaneSlice(ViewOrientation orientation, int sliceIndex)
+{
+    if (!m_mask3DViewer) {
+        return;
+    }
+    switch (orientation) {
+    case ViewOrientation::Axial:
+        m_mask3DViewer->setAxialSlice(sliceIndex);
+        break;
+    case ViewOrientation::Coronal:
+        m_mask3DViewer->setCoronalSlice(sliceIndex);
+        break;
+    case ViewOrientation::Sagittal:
+        m_mask3DViewer->setSagittalSlice(sliceIndex);
+        break;
+    }
+}
+
 void CTViewerWidget::refresh3DMaskSurface()
 {
     if (!m_mask3DViewer) {
@@ -1050,6 +1102,7 @@ void CTViewerWidget::setVolumeAndMask(const VolumeData &volume, const MaskVolume
     updateSliceImages();
     updateSliceLabel();
     updateAllFitScales();
+    configure3DCtPlanes();
     refresh3DMaskSurface();
 
     if (!m_hasMask && hasMask) {

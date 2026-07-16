@@ -36,15 +36,17 @@ Thumbs.db
 /.qmake.stash
 **/.qmlls.ini
 
-# qtcreator generated files
+# Qt Creator local state
 *.pro.user*
 *.qbs.user*
 CMakeLists.txt.user*
+/.qtcreator/
 
-# xemacs temporary files
+# Duplicate/local CMake preset copies. Keep CMakePresets.json itself tracked.
+/CMakePresets [0-9]*.json
+
+# Editor temporary files
 *.flc
-
-# Vim temporary files
 .*.swp
 
 # Visual Studio generated files
@@ -70,19 +72,19 @@ CMakeLists.txt.user*
 *.pyc
 
 # Binaries
-# --------
 *.dll
 *.exe
 
-# Directories with generated files
+# Generated build directories
 .moc/
 .obj/
 .pch/
 .rcc/
 .uic/
 /build*/
-/.qtcreator/
 
-# Local downloaded job/case cache. Contains CT volumes, masks, and metadata
-# produced by the desktop client; do not commit patient/case data.
-/cac_platform/cache/
+# Local runtime/download cache. This contains patient DICOM files, volumes,
+# masks, edit history, and job metadata and must never be committed.
+/cac_platform/
+/cache/
+/cases/

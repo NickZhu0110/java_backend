@@ -178,6 +178,8 @@ private:
     void updateZoomLabel(ViewOrientation orientation);
     void updateGlobalZoomLabel();
     void refresh3DMaskSurface();
+    void configure3DCtPlanes();
+    void update3DPlaneSlice(ViewOrientation orientation, int sliceIndex);
     void handleViewWheel(ViewOrientation orientation, QWheelEvent *event);
     void handleViewResized(ViewOrientation orientation);
     void updateToolState();
@@ -229,6 +231,9 @@ private:
     Mask3DViewerWidget *m_mask3DViewer = nullptr;
     QSlider *m_3DSurfaceOpacitySlider = nullptr;
     QLabel *m_3DSurfaceOpacityLabel = nullptr;
+    QCheckBox *m_showAxial3DPlaneCheckBox = nullptr;
+    QCheckBox *m_showCoronal3DPlaneCheckBox = nullptr;
+    QCheckBox *m_showSagittal3DPlaneCheckBox = nullptr;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
     QWidget *m_threeDPanel = nullptr;

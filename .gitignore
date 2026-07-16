@@ -61,6 +61,17 @@ reports/
 masks/
 storage/
 
+# Native medical-image and generated volume artifacts. These may contain PHI
+# and must stay outside source control regardless of where they are copied.
+*.dcm
+*.dicom
+*.nrrd
+*.nii
+*.nii.gz
+*.mhd
+*.mha
+*.raw
+
 # Models
 *.pt
 *.pth

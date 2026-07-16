@@ -17,6 +17,9 @@
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkImageData.h>
+#include <vtkImageProperty.h>
+#include <vtkImageSlice.h>
+#include <vtkImageSliceMapper.h>
 #include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
@@ -30,6 +33,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 class StrictTrackballCameraStyle final : public vtkInteractorStyleTrackballCamera
 {
@@ -147,6 +151,7 @@ namespace {
 
 constexpr bool kVerbose3DMouseLogs = false;
 constexpr bool kVerbose3DLogs = false;
+constexpr double kGeometryTolerance = 1e-6;
 
 double spacingValue(const MaskVolume &mask, int axis)
 {
@@ -172,6 +177,30 @@ bool boundsAreValid(const double bounds[6])
     }) && bounds[0] <= bounds[1]
         && bounds[2] <= bounds[3]
         && bounds[4] <= bounds[5];
+}
+
+bool nearlyEqual(double left, double right)
+{
+    return std::abs(left - right) <= kGeometryTolerance;
+}
+
+bool directionIsIdentity(const std::vector<double> &direction)
+{
+    static constexpr double identity[9] = {
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    if (direction.size() != 9) {
+        return false;
+    }
+    for (int index = 0; index < 9; ++index) {
+        if (!std::isfinite(direction[static_cast<size_t>(index)])
+            || !nearlyEqual(direction[static_cast<size_t>(index)], identity[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 const char *anatomicalLabel(int physicalAxis, bool positive)
@@ -313,6 +342,7 @@ void Mask3DViewerWidget::clearVolumeBoundsGuide()
         m_boundsActor = nullptr;
     }
     m_hasSurfaceFrameBounds = false;
+    updateCtPlaneVisibility();
 }
 
 void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
@@ -355,6 +385,8 @@ void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
     m_boundsActor->GetProperty()->SetOpacity(0.38);
     m_boundsActor->GetProperty()->SetLineWidth(1.25);
     m_renderer->AddActor(m_boundsActor);
+    updateCtPlaneCropping();
+    updateCtPlaneVisibility();
 
     qInfo() << "3D CAC guide cube center=" << centerX << centerY << centerZ
             << "side lengths=" << cubeSideLength << cubeSideLength << cubeSideLength
@@ -527,6 +559,7 @@ void Mask3DViewerWidget::clear()
         m_renderer->RemoveActor(m_maskActor);
         m_maskActor = nullptr;
     }
+    m_ctMaskGeometryAligned = false;
     clearVolumeBoundsGuide();
     m_hasRenderedMask = false;
     m_renderWindow->Render();
@@ -588,6 +621,222 @@ void Mask3DViewerWidget::resetCamera()
     }
 }
 
+void Mask3DViewerWidget::clearCtVolume()
+{
+    for (int orientation = 0; orientation < 3; ++orientation) {
+        if (m_ctPlaneActors[static_cast<size_t>(orientation)]) {
+            m_renderer->RemoveViewProp(m_ctPlaneActors[static_cast<size_t>(orientation)]);
+        }
+        m_ctPlaneActors[static_cast<size_t>(orientation)] = nullptr;
+        m_ctPlaneMappers[static_cast<size_t>(orientation)] = nullptr;
+    }
+    m_ctImageData = nullptr;
+    m_hasCtVolume = false;
+    m_ctMaskGeometryAligned = false;
+}
+
+void Mask3DViewerWidget::setCtVolume(const VolumeData &volume,
+                                     double windowWidth,
+                                     double windowLevel)
+{
+    const bool dimensionsValid = volume.isValid();
+    const bool geometryArraysValid = volume.spacing.size() == 3
+        && volume.origin.size() == 3 && directionIsIdentity(volume.direction);
+    bool geometryValuesValid = geometryArraysValid;
+    if (geometryValuesValid) {
+        for (int axis = 0; axis < 3; ++axis) {
+            geometryValuesValid = geometryValuesValid
+                && std::isfinite(volume.spacing[static_cast<size_t>(axis)])
+                && volume.spacing[static_cast<size_t>(axis)] > 0.0
+                && std::isfinite(volume.origin[static_cast<size_t>(axis)]);
+        }
+    }
+    if (!dimensionsValid || !geometryValuesValid) {
+        clearCtVolume();
+        qWarning() << "3D CT planes disabled: invalid volume geometry or non-identity direction matrix.";
+        m_renderWindow->Render();
+        return;
+    }
+
+    vtkNew<vtkImageData> imageData;
+    imageData->SetDimensions(volume.width, volume.height, volume.depth);
+    imageData->SetSpacing(volume.spacing.data());
+    imageData->SetOrigin(volume.origin.data());
+    imageData->SetDirectionMatrix(volume.direction.data());
+    imageData->AllocateScalars(VTK_SHORT, 1);
+    std::memcpy(imageData->GetScalarPointer(),
+                volume.huVoxels.data(),
+                volume.huVoxels.size() * sizeof(int16_t));
+
+    clearCtVolume();
+    m_ctImageData = imageData;
+    m_ctDimensions = {volume.width, volume.height, volume.depth};
+    for (int axis = 0; axis < 3; ++axis) {
+        m_ctSpacing[static_cast<size_t>(axis)] = volume.spacing[static_cast<size_t>(axis)];
+        m_ctOrigin[static_cast<size_t>(axis)] = volume.origin[static_cast<size_t>(axis)];
+    }
+    std::copy(volume.direction.cbegin(), volume.direction.cend(), m_ctDirection.begin());
+    m_hasCtVolume = true;
+    m_ctMaskGeometryAligned = false;
+
+    for (int orientation = 0; orientation < 3; ++orientation) {
+        auto mapper = vtkSmartPointer<vtkImageSliceMapper>::New();
+        mapper->SetInputData(m_ctImageData);
+        mapper->SetOrientation(orientation);
+        mapper->CroppingOn();
+
+        auto actor = vtkSmartPointer<vtkImageSlice>::New();
+        actor->SetMapper(mapper);
+        actor->SetPickable(false);
+        actor->GetProperty()->SetColorWindow(std::max(1.0, windowWidth));
+        actor->GetProperty()->SetColorLevel(windowLevel);
+        actor->GetProperty()->SetInterpolationTypeToLinear();
+
+        m_ctPlaneMappers[static_cast<size_t>(orientation)] = mapper;
+        m_ctPlaneActors[static_cast<size_t>(orientation)] = actor;
+        m_renderer->AddViewProp(actor);
+        setCtPlaneSlice(orientation, m_ctPlaneSlices[static_cast<size_t>(orientation)]);
+    }
+    updateCtPlaneVisibility();
+    m_renderWindow->Render();
+
+    qInfo() << "Configured 3D CT planes"
+            << volume.width << "x" << volume.height << "x" << volume.depth
+            << "spacing=" << m_ctSpacing[0] << m_ctSpacing[1] << m_ctSpacing[2]
+            << "origin=" << m_ctOrigin[0] << m_ctOrigin[1] << m_ctOrigin[2]
+            << "window/level=" << windowWidth << windowLevel;
+}
+
+void Mask3DViewerWidget::setCtPlaneSlice(int orientation, int index)
+{
+    if (orientation < 0 || orientation > 2) {
+        return;
+    }
+    const size_t plane = static_cast<size_t>(orientation);
+    const int maximum = std::max(0, m_ctDimensions[plane] - 1);
+    m_ctPlaneSlices[plane] = std::clamp(index, 0, maximum);
+    if (m_ctPlaneMappers[plane]) {
+        m_ctPlaneMappers[plane]->SetSliceNumber(m_ctPlaneSlices[plane]);
+        updateCtPlaneCropping();
+        m_renderWindow->Render();
+    }
+}
+
+void Mask3DViewerWidget::setAxialSlice(int index)
+{
+    setCtPlaneSlice(2, index);
+}
+
+void Mask3DViewerWidget::setCoronalSlice(int index)
+{
+    setCtPlaneSlice(1, index);
+}
+
+void Mask3DViewerWidget::setSagittalSlice(int index)
+{
+    setCtPlaneSlice(0, index);
+}
+
+void Mask3DViewerWidget::setCtPlaneVisible(int orientation, bool visible)
+{
+    if (orientation < 0 || orientation > 2) {
+        return;
+    }
+    m_ctPlaneVisibilityRequested[static_cast<size_t>(orientation)] = visible;
+    updateCtPlaneVisibility();
+    m_renderWindow->Render();
+}
+
+void Mask3DViewerWidget::setAxialPlaneVisible(bool visible)
+{
+    setCtPlaneVisible(2, visible);
+}
+
+void Mask3DViewerWidget::setCoronalPlaneVisible(bool visible)
+{
+    setCtPlaneVisible(1, visible);
+}
+
+void Mask3DViewerWidget::setSagittalPlaneVisible(bool visible)
+{
+    setCtPlaneVisible(0, visible);
+}
+
+void Mask3DViewerWidget::updateCtPlaneVisibility()
+{
+    const bool geometryReady = m_hasCtVolume && m_ctMaskGeometryAligned
+        && m_hasSurfaceFrameBounds;
+    for (int orientation = 0; orientation < 3; ++orientation) {
+        const size_t plane = static_cast<size_t>(orientation);
+        if (m_ctPlaneActors[plane]) {
+            m_ctPlaneActors[plane]->SetVisibility(
+                geometryReady && m_ctPlaneVisibilityRequested[plane]);
+        }
+    }
+}
+
+void Mask3DViewerWidget::updateCtPlaneCropping()
+{
+    if (!m_hasCtVolume || !m_hasSurfaceFrameBounds) {
+        return;
+    }
+
+    int roiExtent[6] = {};
+    for (int axis = 0; axis < 3; ++axis) {
+        const double lower = (m_surfaceFrameBounds[axis * 2] - m_ctOrigin[static_cast<size_t>(axis)])
+            / m_ctSpacing[static_cast<size_t>(axis)];
+        const double upper = (m_surfaceFrameBounds[axis * 2 + 1] - m_ctOrigin[static_cast<size_t>(axis)])
+            / m_ctSpacing[static_cast<size_t>(axis)];
+        roiExtent[axis * 2] = std::clamp(static_cast<int>(std::floor(lower)),
+                                         0,
+                                         m_ctDimensions[static_cast<size_t>(axis)] - 1);
+        roiExtent[axis * 2 + 1] = std::clamp(static_cast<int>(std::ceil(upper)),
+                                             0,
+                                             m_ctDimensions[static_cast<size_t>(axis)] - 1);
+    }
+
+    for (int orientation = 0; orientation < 3; ++orientation) {
+        const size_t plane = static_cast<size_t>(orientation);
+        if (!m_ctPlaneMappers[plane]) {
+            continue;
+        }
+        int planeExtent[6];
+        std::copy(roiExtent, roiExtent + 6, planeExtent);
+        planeExtent[orientation * 2] = m_ctPlaneSlices[plane];
+        planeExtent[orientation * 2 + 1] = m_ctPlaneSlices[plane];
+        m_ctPlaneMappers[plane]->SetCroppingRegion(planeExtent);
+        m_ctPlaneMappers[plane]->Modified();
+    }
+}
+
+bool Mask3DViewerWidget::ctGeometryMatchesMask(const MaskVolume &mask) const
+{
+    if (!m_hasCtVolume || !mask.isValid()
+        || mask.width != m_ctDimensions[0]
+        || mask.height != m_ctDimensions[1]
+        || mask.depth != m_ctDimensions[2]
+        || mask.spacing.size() != 3
+        || mask.origin.size() != 3
+        || !directionIsIdentity(mask.direction)) {
+        return false;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(mask.spacing[static_cast<size_t>(axis)])
+            || !std::isfinite(mask.origin[static_cast<size_t>(axis)])
+            || !nearlyEqual(mask.spacing[static_cast<size_t>(axis)], m_ctSpacing[static_cast<size_t>(axis)])
+            || !nearlyEqual(mask.origin[static_cast<size_t>(axis)], m_ctOrigin[static_cast<size_t>(axis)])) {
+            return false;
+        }
+    }
+    for (int index = 0; index < 9; ++index) {
+        if (!nearlyEqual(mask.direction[static_cast<size_t>(index)],
+                         m_ctDirection[static_cast<size_t>(index)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Mask3DViewerWidget::setMaskVolume(const MaskVolume &mask)
 {
     refreshFromMask(mask);
@@ -615,6 +864,11 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
         return;
     }
 
+    m_ctMaskGeometryAligned = ctGeometryMatchesMask(mask);
+    if (m_hasCtVolume && !m_ctMaskGeometryAligned) {
+        qWarning() << "3D CT planes disabled: CT and mask physical geometry do not match,"
+                      " or direction is not identity.";
+    }
     updateOrientationLabels(mask);
 
     qsizetype nonzeroCount = 0;

@@ -151,7 +151,7 @@ namespace {
 
 constexpr bool kVerbose3DMouseLogs = false;
 constexpr bool kVerbose3DLogs = false;
-constexpr bool kVerbosePlaneRenderingLogs = true;
+constexpr bool kVerbosePlaneRenderingLogs = false;
 constexpr double kGeometryTolerance = 1e-6;
 
 using PlaneCorners = std::array<std::array<double, 3>, 4>;
@@ -434,6 +434,7 @@ void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
     m_boundsActor->GetProperty()->SetLineWidth(1.25);
     m_renderer->AddActor(m_boundsActor);
     updateAllPositionPlaneGeometry();
+    updateAllPositionPlaneMaskIntersections();
     updatePositionPlaneVisibility();
 
     qInfo() << "3D CAC guide cube center=" << centerX << centerY << centerZ
@@ -607,6 +608,9 @@ void Mask3DViewerWidget::clear()
         m_renderer->RemoveActor(m_maskActor);
         m_maskActor = nullptr;
     }
+    m_intersectionMask = {};
+    m_hasIntersectionMask = false;
+    clearPositionPlaneMaskIntersections();
     m_volumeMaskGeometryAligned = false;
     clearVolumeBoundsGuide();
     m_hasRenderedMask = false;
@@ -679,9 +683,15 @@ void Mask3DViewerWidget::clearVolumeGeometry()
         if (m_positionPlaneBorderActors[plane]) {
             m_renderer->RemoveActor(m_positionPlaneBorderActors[plane]);
         }
+        if (m_positionPlaneIntersectionActors[plane]) {
+            m_renderer->RemoveActor(m_positionPlaneIntersectionActors[plane]);
+        }
         m_positionPlaneSources[plane] = nullptr;
         m_positionPlaneFillMappers[plane] = nullptr;
         m_positionPlaneFillActors[plane] = nullptr;
+        m_positionPlaneIntersectionData[plane] = nullptr;
+        m_positionPlaneIntersectionMappers[plane] = nullptr;
+        m_positionPlaneIntersectionActors[plane] = nullptr;
         m_positionPlaneBorderPoints[plane] = nullptr;
         m_positionPlaneBorderData[plane] = nullptr;
         m_positionPlaneBorderMappers[plane] = nullptr;
@@ -693,6 +703,11 @@ void Mask3DViewerWidget::clearVolumeGeometry()
 
 void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
 {
+    // A newly configured case must not briefly reuse intersection voxels retained
+    // from the previous case before its working mask is supplied.
+    m_intersectionMask = {};
+    m_hasIntersectionMask = false;
+
     const bool dimensionsValid = volume.isValid();
     const bool geometryArraysValid = volume.spacing.size() == 3
         && volume.origin.size() == 3 && volume.direction.size() == 9;
@@ -741,6 +756,11 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
         {0.10, 0.78, 1.00}
     };
     static constexpr double fillOpacity[3] = {0.28, 0.26, 0.28};
+    static constexpr double intersectionColors[3][3] = {
+        {1.00, 0.84, 0.98},
+        {0.86, 1.00, 0.88},
+        {0.82, 0.96, 1.00}
+    };
 
     for (int axis = 0; axis < 3; ++axis) {
         const size_t plane = static_cast<size_t>(axis);
@@ -767,6 +787,27 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
         fillActor->GetProperty()->SetSpecular(0.0);
         fillActor->GetProperty()->BackfaceCullingOff();
         fillActor->GetProperty()->FrontfaceCullingOff();
+
+        auto intersectionData = vtkSmartPointer<vtkPolyData>::New();
+        auto intersectionMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        intersectionMapper->SetInputData(intersectionData);
+        intersectionMapper->ScalarVisibilityOff();
+
+        auto intersectionActor = vtkSmartPointer<vtkActor>::New();
+        intersectionActor->SetMapper(intersectionMapper);
+        intersectionActor->SetPickable(false);
+        intersectionActor->SetUseBounds(false);
+        intersectionActor->GetProperty()->SetColor(intersectionColors[axis][0],
+                                                   intersectionColors[axis][1],
+                                                   intersectionColors[axis][2]);
+        intersectionActor->GetProperty()->SetRepresentationToSurface();
+        intersectionActor->GetProperty()->SetOpacity(0.96);
+        intersectionActor->GetProperty()->LightingOff();
+        intersectionActor->GetProperty()->SetAmbient(1.0);
+        intersectionActor->GetProperty()->SetDiffuse(0.0);
+        intersectionActor->GetProperty()->SetSpecular(0.0);
+        intersectionActor->GetProperty()->BackfaceCullingOff();
+        intersectionActor->GetProperty()->FrontfaceCullingOff();
 
         auto borderPoints = vtkSmartPointer<vtkPoints>::New();
         borderPoints->SetNumberOfPoints(4);
@@ -803,11 +844,15 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
         m_positionPlaneSources[plane] = source;
         m_positionPlaneFillMappers[plane] = fillMapper;
         m_positionPlaneFillActors[plane] = fillActor;
+        m_positionPlaneIntersectionData[plane] = intersectionData;
+        m_positionPlaneIntersectionMappers[plane] = intersectionMapper;
+        m_positionPlaneIntersectionActors[plane] = intersectionActor;
         m_positionPlaneBorderPoints[plane] = borderPoints;
         m_positionPlaneBorderData[plane] = borderData;
         m_positionPlaneBorderMappers[plane] = borderMapper;
         m_positionPlaneBorderActors[plane] = borderActor;
         m_renderer->AddActor(fillActor);
+        m_renderer->AddActor(intersectionActor);
         m_renderer->AddActor(borderActor);
     }
 
@@ -846,6 +891,7 @@ void Mask3DViewerWidget::setPositionPlaneSlice(int axis, int index)
     m_positionPlaneSlices[plane] = std::clamp(index, 0, maximum);
     if (m_positionPlaneSources[plane]) {
         updatePositionPlaneGeometry(axis);
+        updatePositionPlaneMaskIntersection(axis);
         m_renderWindow->Render();
     }
 }
@@ -967,6 +1013,186 @@ void Mask3DViewerWidget::updateAllPositionPlaneGeometry()
     }
 }
 
+void Mask3DViewerWidget::clearPositionPlaneMaskIntersections()
+{
+    for (vtkSmartPointer<vtkPolyData> &data : m_positionPlaneIntersectionData) {
+        if (!data) {
+            continue;
+        }
+        data->SetPoints(nullptr);
+        data->SetPolys(nullptr);
+        data->Modified();
+    }
+}
+
+void Mask3DViewerWidget::updatePositionPlaneMaskIntersection(int axis)
+{
+    if (axis < 0 || axis > 2) {
+        return;
+    }
+
+    vtkPolyData *intersectionData =
+        m_positionPlaneIntersectionData[static_cast<size_t>(axis)];
+    if (!intersectionData) {
+        return;
+    }
+
+    auto points = vtkSmartPointer<vtkPoints>::New();
+    auto quads = vtkSmartPointer<vtkCellArray>::New();
+    if (!m_hasVolumeGeometry || !m_hasSurfaceFrameBounds || !m_hasIntersectionMask
+        || !volumeGeometryMatchesMask(m_intersectionMask)) {
+        intersectionData->SetPoints(points);
+        intersectionData->SetPolys(quads);
+        intersectionData->Modified();
+        return;
+    }
+
+    const int slice = m_positionPlaneSlices[static_cast<size_t>(axis)];
+    const double visualOffset = std::max(1e-5,
+        *std::min_element(m_volumeSpacing.cbegin(), m_volumeSpacing.cend()) * 0.01);
+    const std::array<double, 3> normal = {
+        m_volumeDirection[static_cast<size_t>(axis)],
+        m_volumeDirection[static_cast<size_t>(3 + axis)],
+        m_volumeDirection[static_cast<size_t>(6 + axis)]
+    };
+
+    auto appendVoxelPatch = [&](int x, int y, int z) {
+        std::array<std::array<double, 3>, 4> indices = {};
+        switch (axis) {
+        case 0: // Sagittal: fixed X, one Y/Z voxel cell.
+            indices = {{{static_cast<double>(x), y - 0.5, z - 0.5},
+                        {static_cast<double>(x), y + 0.5, z - 0.5},
+                        {static_cast<double>(x), y + 0.5, z + 0.5},
+                        {static_cast<double>(x), y - 0.5, z + 0.5}}};
+            break;
+        case 1: // Coronal: fixed Y, one X/Z voxel cell.
+            indices = {{{x - 0.5, static_cast<double>(y), z - 0.5},
+                        {x + 0.5, static_cast<double>(y), z - 0.5},
+                        {x + 0.5, static_cast<double>(y), z + 0.5},
+                        {x - 0.5, static_cast<double>(y), z + 0.5}}};
+            break;
+        case 2: // Axial: fixed Z, one X/Y voxel cell.
+            indices = {{{x - 0.5, y - 0.5, static_cast<double>(z)},
+                        {x + 0.5, y - 0.5, static_cast<double>(z)},
+                        {x + 0.5, y + 0.5, static_cast<double>(z)},
+                        {x - 0.5, y + 0.5, static_cast<double>(z)}}};
+            break;
+        }
+
+        std::array<std::array<double, 3>, 4> worldCorners = {};
+        for (size_t corner = 0; corner < worldCorners.size(); ++corner) {
+            worldCorners[corner] = indexToWorld(indices[corner]);
+        }
+
+        for (int worldAxis = 0; worldAxis < 3; ++worldAxis) {
+            if (worldAxis == axis) {
+                continue;
+            }
+            const double lower = m_surfaceFrameBounds[worldAxis * 2];
+            const double upper = m_surfaceFrameBounds[worldAxis * 2 + 1];
+            double patchLower = worldCorners[0][static_cast<size_t>(worldAxis)];
+            double patchUpper = patchLower;
+            for (size_t corner = 1; corner < worldCorners.size(); ++corner) {
+                patchLower = std::min(patchLower, worldCorners[corner][static_cast<size_t>(worldAxis)]);
+                patchUpper = std::max(patchUpper, worldCorners[corner][static_cast<size_t>(worldAxis)]);
+            }
+            if (patchUpper <= lower || patchLower >= upper) {
+                return;
+            }
+            for (auto &corner : worldCorners) {
+                corner[static_cast<size_t>(worldAxis)] = std::clamp(
+                    corner[static_cast<size_t>(worldAxis)], lower, upper);
+            }
+        }
+
+        vtkIdType pointIds[4] = {};
+        for (size_t corner = 0; corner < worldCorners.size(); ++corner) {
+            for (int component = 0; component < 3; ++component) {
+                worldCorners[corner][static_cast<size_t>(component)] +=
+                    normal[static_cast<size_t>(component)] * visualOffset;
+            }
+            pointIds[corner] = points->InsertNextPoint(worldCorners[corner].data());
+        }
+        quads->InsertNextCell(4, pointIds);
+    };
+
+    switch (axis) {
+    case 0:
+        for (int z = 0; z < m_intersectionMask.depth; ++z) {
+            for (int y = 0; y < m_intersectionMask.height; ++y) {
+                if (m_intersectionMask.value(slice, y, z) != 0) {
+                    appendVoxelPatch(slice, y, z);
+                }
+            }
+        }
+        break;
+    case 1:
+        for (int z = 0; z < m_intersectionMask.depth; ++z) {
+            for (int x = 0; x < m_intersectionMask.width; ++x) {
+                if (m_intersectionMask.value(x, slice, z) != 0) {
+                    appendVoxelPatch(x, slice, z);
+                }
+            }
+        }
+        break;
+    case 2:
+        for (int y = 0; y < m_intersectionMask.height; ++y) {
+            for (int x = 0; x < m_intersectionMask.width; ++x) {
+                if (m_intersectionMask.value(x, y, slice) != 0) {
+                    appendVoxelPatch(x, y, slice);
+                }
+            }
+        }
+        break;
+    }
+
+    intersectionData->SetPoints(points);
+    intersectionData->SetPolys(quads);
+    intersectionData->Modified();
+
+    if constexpr (kVerbosePlaneRenderingLogs) {
+        qDebug() << planeName(axis) << "workingMask intersection slice=" << slice
+                 << "foreground patches=" << quads->GetNumberOfCells();
+    }
+}
+
+void Mask3DViewerWidget::updateAllPositionPlaneMaskIntersections()
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        updatePositionPlaneMaskIntersection(axis);
+    }
+}
+
+void Mask3DViewerWidget::updateMaskIntersections(const MaskVolume &mask,
+                                                 bool updateAxial,
+                                                 bool updateCoronal,
+                                                 bool updateSagittal)
+{
+    if (!volumeGeometryMatchesMask(mask)) {
+        qWarning() << "3D workingMask intersection update skipped: mask geometry mismatch.";
+        m_intersectionMask = {};
+        m_hasIntersectionMask = false;
+        clearPositionPlaneMaskIntersections();
+        m_renderWindow->Render();
+        return;
+    }
+
+    m_intersectionMask = mask;
+    m_hasIntersectionMask = true;
+    if (updateSagittal) {
+        updatePositionPlaneMaskIntersection(0);
+    }
+    if (updateCoronal) {
+        updatePositionPlaneMaskIntersection(1);
+    }
+    if (updateAxial) {
+        updatePositionPlaneMaskIntersection(2);
+    }
+    if (updateAxial || updateCoronal || updateSagittal) {
+        m_renderWindow->Render();
+    }
+}
+
 void Mask3DViewerWidget::updatePositionPlaneVisibility()
 {
     const bool geometryReady = m_hasVolumeGeometry && m_volumeMaskGeometryAligned
@@ -976,6 +1202,9 @@ void Mask3DViewerWidget::updatePositionPlaneVisibility()
         const bool visible = geometryReady && m_positionPlaneVisibilityRequested[plane];
         if (m_positionPlaneFillActors[plane]) {
             m_positionPlaneFillActors[plane]->SetVisibility(visible);
+        }
+        if (m_positionPlaneIntersectionActors[plane]) {
+            m_positionPlaneIntersectionActors[plane]->SetVisibility(visible);
         }
         if (m_positionPlaneBorderActors[plane]) {
             m_positionPlaneBorderActors[plane]->SetVisibility(visible);
@@ -1039,6 +1268,8 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     }
 
     m_volumeMaskGeometryAligned = volumeGeometryMatchesMask(mask);
+    m_intersectionMask = mask;
+    m_hasIntersectionMask = m_volumeMaskGeometryAligned;
     if (m_hasVolumeGeometry && !m_volumeMaskGeometryAligned) {
         qWarning() << "3D position planes disabled: volume and mask physical geometry do not match,"
                       " or direction is not identity.";

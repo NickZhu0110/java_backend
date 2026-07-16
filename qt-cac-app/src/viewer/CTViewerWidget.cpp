@@ -1032,6 +1032,31 @@ void CTViewerWidget::refresh3DMaskSurface()
     m_mask3DViewer->clear();
 }
 
+void CTViewerWidget::refresh3DMaskIntersections(const EditOperation &operation)
+{
+    if (!m_mask3DViewer || !m_hasWorkingMask || !m_workingMask.isValid()) {
+        return;
+    }
+
+    bool updateAxial = false;
+    bool updateCoronal = false;
+    bool updateSagittal = false;
+    const int axialSlice = panel(ViewOrientation::Axial).sliceIndex;
+    const int coronalSlice = panel(ViewOrientation::Coronal).sliceIndex;
+    const int sagittalSlice = panel(ViewOrientation::Sagittal).sliceIndex;
+    for (const PixelChange &change : operation.changes) {
+        updateAxial = updateAxial || change.z == axialSlice;
+        updateCoronal = updateCoronal || change.y == coronalSlice;
+        updateSagittal = updateSagittal || change.x == sagittalSlice;
+        if (updateAxial && updateCoronal && updateSagittal) {
+            break;
+        }
+    }
+
+    m_mask3DViewer->updateMaskIntersections(
+        m_workingMask, updateAxial, updateCoronal, updateSagittal);
+}
+
 void CTViewerWidget::handleViewWheel(ViewOrientation orientation, QWheelEvent *event)
 {
     if (!event) {
@@ -1565,6 +1590,7 @@ void CTViewerWidget::finishBrushStroke()
     m_redoStack.clear();
     setMaskEditDirty(true);
     updateSliceImages();
+    refresh3DMaskIntersections(m_activeBrushOperation);
 
     qInfo() << "Brush stroke"
             << "orientation=" << orientationName(m_activeBrushOrientation)
@@ -1784,6 +1810,7 @@ void CTViewerWidget::applyEditOperation(const EditOperation &operation, bool use
         m_workingMask.setValue(change.x, change.y, change.z, value);
     }
     updateSliceImages();
+    refresh3DMaskIntersections(operation);
 }
 
 void CTViewerWidget::undoLastEdit()

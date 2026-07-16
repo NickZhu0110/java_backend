@@ -40,6 +40,10 @@ public:
     void setAxialPlaneVisible(bool visible);
     void setCoronalPlaneVisible(bool visible);
     void setSagittalPlaneVisible(bool visible);
+    void updateMaskIntersections(const MaskVolume &mask,
+                                 bool updateAxial,
+                                 bool updateCoronal,
+                                 bool updateSagittal);
     void setMaskVolume(const MaskVolume &mask);
     void setSurfaceOpacity(double opacity);
     double surfaceOpacity() const;
@@ -61,6 +65,9 @@ private:
     void setPositionPlaneVisible(int axis, bool visible);
     void updatePositionPlaneGeometry(int axis);
     void updateAllPositionPlaneGeometry();
+    void updatePositionPlaneMaskIntersection(int axis);
+    void updateAllPositionPlaneMaskIntersections();
+    void clearPositionPlaneMaskIntersections();
     void updatePositionPlaneVisibility();
     bool volumeGeometryMatchesMask(const MaskVolume &mask) const;
     std::array<double, 3> indexToWorld(const std::array<double, 3> &index) const;
@@ -76,6 +83,9 @@ private:
     std::array<vtkSmartPointer<vtkPlaneSource>, 3> m_positionPlaneSources;
     std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneFillMappers;
     std::array<vtkSmartPointer<vtkActor>, 3> m_positionPlaneFillActors;
+    std::array<vtkSmartPointer<vtkPolyData>, 3> m_positionPlaneIntersectionData;
+    std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneIntersectionMappers;
+    std::array<vtkSmartPointer<vtkActor>, 3> m_positionPlaneIntersectionActors;
     std::array<vtkSmartPointer<vtkPoints>, 3> m_positionPlaneBorderPoints;
     std::array<vtkSmartPointer<vtkPolyData>, 3> m_positionPlaneBorderData;
     std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneBorderMappers;
@@ -88,11 +98,13 @@ private:
                                                0.0, 0.0, 1.0};
     std::array<int, 3> m_positionPlaneSlices = {0, 0, 0};
     std::array<bool, 3> m_positionPlaneVisibilityRequested = {false, false, true};
+    MaskVolume m_intersectionMask;
     double m_surfaceFrameBounds[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     bool m_hasSurfaceFrameBounds = false;
     bool m_hasRenderedMask = false;
     bool m_hasVolumeGeometry = false;
     bool m_volumeMaskGeometryAligned = false;
+    bool m_hasIntersectionMask = false;
     double m_surfaceOpacity = 0.9;
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;

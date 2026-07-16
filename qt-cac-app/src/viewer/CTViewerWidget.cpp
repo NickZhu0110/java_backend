@@ -281,7 +281,7 @@ void CTViewerWidget::createSyntheticStudy()
         viewPanel.sliceSlider->setValue(viewPanel.sliceIndex);
     }
     updateAllFitScales();
-    configure3DCtPlanes();
+    configure3DPositionPlanes();
     refresh3DMaskSurface();
 }
 
@@ -987,12 +987,12 @@ void CTViewerWidget::updateGlobalZoomLabel()
     m_globalZoomLabel->setText(QStringLiteral("Global %1x").arg(static_cast<double>(m_globalZoomSlider->value()) / 100.0, 0, 'f', 2));
 }
 
-void CTViewerWidget::configure3DCtPlanes()
+void CTViewerWidget::configure3DPositionPlanes()
 {
     if (!m_mask3DViewer || !m_volume.isValid()) {
         return;
     }
-    m_mask3DViewer->setCtVolume(m_volume, m_windowWidth, m_windowLevel);
+    m_mask3DViewer->setVolumeGeometry(m_volume);
     m_mask3DViewer->setAxialSlice(panel(ViewOrientation::Axial).sliceIndex);
     m_mask3DViewer->setCoronalSlice(panel(ViewOrientation::Coronal).sliceIndex);
     m_mask3DViewer->setSagittalSlice(panel(ViewOrientation::Sagittal).sliceIndex);
@@ -1102,7 +1102,7 @@ void CTViewerWidget::setVolumeAndMask(const VolumeData &volume, const MaskVolume
     updateSliceImages();
     updateSliceLabel();
     updateAllFitScales();
-    configure3DCtPlanes();
+    configure3DPositionPlanes();
     refresh3DMaskSurface();
 
     if (!m_hasMask && hasMask) {

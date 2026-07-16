@@ -16,10 +16,11 @@
 class QVTKOpenGLNativeWidget;
 class StrictTrackballCameraStyle;
 class vtkAnnotatedCubeActor;
-class vtkImageData;
-class vtkImageSlice;
-class vtkImageSliceMapper;
 class vtkOrientationMarkerWidget;
+class vtkPlaneSource;
+class vtkPoints;
+class vtkPolyData;
+class vtkPolyDataMapper;
 
 class Mask3DViewerWidget : public QWidget
 {
@@ -32,7 +33,7 @@ public:
 
     void clear();
     void resetCamera();
-    void setCtVolume(const VolumeData &volume, double windowWidth, double windowLevel);
+    void setVolumeGeometry(const VolumeData &volume);
     void setAxialSlice(int index);
     void setCoronalSlice(int index);
     void setSagittalSlice(int index);
@@ -55,12 +56,14 @@ private:
     void setOrientationLabels(const char *const plusLabels[3], const char *const minusLabels[3]);
     void updateModelBoundsGuide(const double surfaceBounds[6]);
     void clearVolumeBoundsGuide();
-    void clearCtVolume();
-    void setCtPlaneSlice(int orientation, int index);
-    void setCtPlaneVisible(int orientation, bool visible);
-    void updateCtPlaneCropping();
-    void updateCtPlaneVisibility();
-    bool ctGeometryMatchesMask(const MaskVolume &mask) const;
+    void clearVolumeGeometry();
+    void setPositionPlaneSlice(int axis, int index);
+    void setPositionPlaneVisible(int axis, bool visible);
+    void updatePositionPlaneGeometry(int axis);
+    void updateAllPositionPlaneGeometry();
+    void updatePositionPlaneVisibility();
+    bool volumeGeometryMatchesMask(const MaskVolume &mask) const;
+    std::array<double, 3> indexToWorld(const std::array<double, 3> &index) const;
 
     QVTKOpenGLNativeWidget *m_vtkWidget = nullptr;
     vtkNew<vtkGenericOpenGLRenderWindow> m_renderWindow;
@@ -70,22 +73,26 @@ private:
     vtkSmartPointer<vtkAnnotatedCubeActor> m_orientationCube;
     vtkSmartPointer<vtkOrientationMarkerWidget> m_orientationMarker;
     vtkSmartPointer<vtkActor> m_boundsActor;
-    vtkSmartPointer<vtkImageData> m_ctImageData;
-    std::array<vtkSmartPointer<vtkImageSliceMapper>, 3> m_ctPlaneMappers;
-    std::array<vtkSmartPointer<vtkImageSlice>, 3> m_ctPlaneActors;
-    std::array<int, 3> m_ctDimensions = {0, 0, 0};
-    std::array<double, 3> m_ctSpacing = {1.0, 1.0, 1.0};
-    std::array<double, 3> m_ctOrigin = {0.0, 0.0, 0.0};
-    std::array<double, 9> m_ctDirection = {1.0, 0.0, 0.0,
-                                           0.0, 1.0, 0.0,
-                                           0.0, 0.0, 1.0};
-    std::array<int, 3> m_ctPlaneSlices = {0, 0, 0};
-    std::array<bool, 3> m_ctPlaneVisibilityRequested = {false, false, true};
+    std::array<vtkSmartPointer<vtkPlaneSource>, 3> m_positionPlaneSources;
+    std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneFillMappers;
+    std::array<vtkSmartPointer<vtkActor>, 3> m_positionPlaneFillActors;
+    std::array<vtkSmartPointer<vtkPoints>, 3> m_positionPlaneBorderPoints;
+    std::array<vtkSmartPointer<vtkPolyData>, 3> m_positionPlaneBorderData;
+    std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneBorderMappers;
+    std::array<vtkSmartPointer<vtkActor>, 3> m_positionPlaneBorderActors;
+    std::array<int, 3> m_volumeDimensions = {0, 0, 0};
+    std::array<double, 3> m_volumeSpacing = {1.0, 1.0, 1.0};
+    std::array<double, 3> m_volumeOrigin = {0.0, 0.0, 0.0};
+    std::array<double, 9> m_volumeDirection = {1.0, 0.0, 0.0,
+                                               0.0, 1.0, 0.0,
+                                               0.0, 0.0, 1.0};
+    std::array<int, 3> m_positionPlaneSlices = {0, 0, 0};
+    std::array<bool, 3> m_positionPlaneVisibilityRequested = {false, false, true};
     double m_surfaceFrameBounds[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     bool m_hasSurfaceFrameBounds = false;
     bool m_hasRenderedMask = false;
-    bool m_hasCtVolume = false;
-    bool m_ctMaskGeometryAligned = false;
+    bool m_hasVolumeGeometry = false;
+    bool m_volumeMaskGeometryAligned = false;
     double m_surfaceOpacity = 0.9;
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;

@@ -13,27 +13,27 @@
 #include <vtkAnnotatedCubeActor.h>
 #include <vtkCamera.h>
 #include <vtkCallbackCommand.h>
+#include <vtkCellArray.h>
 #include <vtkCommand.h>
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkImageData.h>
-#include <vtkImageProperty.h>
-#include <vtkImageSlice.h>
-#include <vtkImageSliceMapper.h>
 #include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkOrientationMarkerWidget.h>
 #include <vtkOutlineSource.h>
+#include <vtkPlaneSource.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyLine.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 
 class StrictTrackballCameraStyle final : public vtkInteractorStyleTrackballCamera
 {
@@ -151,7 +151,10 @@ namespace {
 
 constexpr bool kVerbose3DMouseLogs = false;
 constexpr bool kVerbose3DLogs = false;
+constexpr bool kVerbosePlaneRenderingLogs = true;
 constexpr double kGeometryTolerance = 1e-6;
+
+using PlaneCorners = std::array<std::array<double, 3>, 4>;
 
 double spacingValue(const MaskVolume &mask, int axis)
 {
@@ -208,6 +211,51 @@ const char *anatomicalLabel(int physicalAxis, bool positive)
     static constexpr const char *positiveLabels[3] = {"L", "P", "S"};
     static constexpr const char *negativeLabels[3] = {"R", "A", "I"};
     return positive ? positiveLabels[physicalAxis] : negativeLabels[physicalAxis];
+}
+
+const char *planeName(int axis)
+{
+    static constexpr const char *names[3] = {"Sagittal", "Coronal", "Axial"};
+    return axis >= 0 && axis < 3 ? names[axis] : "Unknown";
+}
+
+void logPositionPlaneState(const char *phase,
+                           int axis,
+                           int sliceIndex,
+                           vtkPlaneSource *fillSource,
+                           vtkPolyDataMapper *fillMapper,
+                           vtkActor *fillActor,
+                           vtkPolyData *borderData,
+                           const PlaneCorners &corners)
+{
+    if constexpr (!kVerbosePlaneRenderingLogs) {
+        return;
+    }
+    if (!fillSource || !fillMapper || !fillActor || !borderData) {
+        qDebug() << phase << planeName(axis) << "plane pipeline incomplete";
+        return;
+    }
+
+    fillSource->Update();
+    vtkPolyData *fillData = fillSource->GetOutput();
+    vtkProperty *property = fillActor->GetProperty();
+    qDebug() << phase << planeName(axis)
+             << "slice=" << sliceIndex
+             << "source=" << static_cast<const void *>(fillSource)
+             << "mapperInput=" << static_cast<const void *>(fillMapper->GetInput())
+             << "points=" << (fillData ? fillData->GetNumberOfPoints() : 0)
+             << "polys=" << (fillData ? fillData->GetNumberOfPolys() : 0)
+             << "lines=" << (fillData ? fillData->GetNumberOfLines() : 0)
+             << "borderLines=" << borderData->GetNumberOfLines()
+             << "visible=" << fillActor->GetVisibility()
+             << "opacity=" << property->GetOpacity()
+             << "representation=" << property->GetRepresentation()
+             << "frontCull=" << property->GetFrontfaceCulling()
+             << "backCull=" << property->GetBackfaceCulling();
+    for (size_t corner = 0; corner < corners.size(); ++corner) {
+        qDebug() << " corner" << corner << "="
+                 << corners[corner][0] << corners[corner][1] << corners[corner][2];
+    }
 }
 
 } // namespace
@@ -342,7 +390,7 @@ void Mask3DViewerWidget::clearVolumeBoundsGuide()
         m_boundsActor = nullptr;
     }
     m_hasSurfaceFrameBounds = false;
-    updateCtPlaneVisibility();
+    updatePositionPlaneVisibility();
 }
 
 void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
@@ -385,8 +433,8 @@ void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
     m_boundsActor->GetProperty()->SetOpacity(0.38);
     m_boundsActor->GetProperty()->SetLineWidth(1.25);
     m_renderer->AddActor(m_boundsActor);
-    updateCtPlaneCropping();
-    updateCtPlaneVisibility();
+    updateAllPositionPlaneGeometry();
+    updatePositionPlaneVisibility();
 
     qInfo() << "3D CAC guide cube center=" << centerX << centerY << centerZ
             << "side lengths=" << cubeSideLength << cubeSideLength << cubeSideLength
@@ -559,7 +607,7 @@ void Mask3DViewerWidget::clear()
         m_renderer->RemoveActor(m_maskActor);
         m_maskActor = nullptr;
     }
-    m_ctMaskGeometryAligned = false;
+    m_volumeMaskGeometryAligned = false;
     clearVolumeBoundsGuide();
     m_hasRenderedMask = false;
     m_renderWindow->Render();
@@ -621,27 +669,33 @@ void Mask3DViewerWidget::resetCamera()
     }
 }
 
-void Mask3DViewerWidget::clearCtVolume()
+void Mask3DViewerWidget::clearVolumeGeometry()
 {
-    for (int orientation = 0; orientation < 3; ++orientation) {
-        if (m_ctPlaneActors[static_cast<size_t>(orientation)]) {
-            m_renderer->RemoveViewProp(m_ctPlaneActors[static_cast<size_t>(orientation)]);
+    for (int axis = 0; axis < 3; ++axis) {
+        const size_t plane = static_cast<size_t>(axis);
+        if (m_positionPlaneFillActors[plane]) {
+            m_renderer->RemoveActor(m_positionPlaneFillActors[plane]);
         }
-        m_ctPlaneActors[static_cast<size_t>(orientation)] = nullptr;
-        m_ctPlaneMappers[static_cast<size_t>(orientation)] = nullptr;
+        if (m_positionPlaneBorderActors[plane]) {
+            m_renderer->RemoveActor(m_positionPlaneBorderActors[plane]);
+        }
+        m_positionPlaneSources[plane] = nullptr;
+        m_positionPlaneFillMappers[plane] = nullptr;
+        m_positionPlaneFillActors[plane] = nullptr;
+        m_positionPlaneBorderPoints[plane] = nullptr;
+        m_positionPlaneBorderData[plane] = nullptr;
+        m_positionPlaneBorderMappers[plane] = nullptr;
+        m_positionPlaneBorderActors[plane] = nullptr;
     }
-    m_ctImageData = nullptr;
-    m_hasCtVolume = false;
-    m_ctMaskGeometryAligned = false;
+    m_hasVolumeGeometry = false;
+    m_volumeMaskGeometryAligned = false;
 }
 
-void Mask3DViewerWidget::setCtVolume(const VolumeData &volume,
-                                     double windowWidth,
-                                     double windowLevel)
+void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
 {
     const bool dimensionsValid = volume.isValid();
     const bool geometryArraysValid = volume.spacing.size() == 3
-        && volume.origin.size() == 3 && directionIsIdentity(volume.direction);
+        && volume.origin.size() == 3 && volume.direction.size() == 9;
     bool geometryValuesValid = geometryArraysValid;
     if (geometryValuesValid) {
         for (int axis = 0; axis < 3; ++axis) {
@@ -650,171 +704,291 @@ void Mask3DViewerWidget::setCtVolume(const VolumeData &volume,
                 && volume.spacing[static_cast<size_t>(axis)] > 0.0
                 && std::isfinite(volume.origin[static_cast<size_t>(axis)]);
         }
+        geometryValuesValid = geometryValuesValid
+            && std::all_of(volume.direction.cbegin(), volume.direction.cend(), [](double value) {
+                   return std::isfinite(value);
+               });
     }
-    if (!dimensionsValid || !geometryValuesValid) {
-        clearCtVolume();
-        qWarning() << "3D CT planes disabled: invalid volume geometry or non-identity direction matrix.";
+
+    // The existing CAC marching-cubes actor is axis-aligned. Until that pipeline
+    // supports direction matrices, rendering an oblique plane would imply a false
+    // alignment, so keep position indicators disabled for non-identity direction.
+    if (!dimensionsValid || !geometryValuesValid || !directionIsIdentity(volume.direction)) {
+        clearVolumeGeometry();
+        qWarning() << "3D position planes disabled: invalid geometry or a direction matrix"
+                      " not supported by the existing CAC surface pipeline.";
         m_renderWindow->Render();
         return;
     }
 
-    vtkNew<vtkImageData> imageData;
-    imageData->SetDimensions(volume.width, volume.height, volume.depth);
-    imageData->SetSpacing(volume.spacing.data());
-    imageData->SetOrigin(volume.origin.data());
-    imageData->SetDirectionMatrix(volume.direction.data());
-    imageData->AllocateScalars(VTK_SHORT, 1);
-    std::memcpy(imageData->GetScalarPointer(),
-                volume.huVoxels.data(),
-                volume.huVoxels.size() * sizeof(int16_t));
-
-    clearCtVolume();
-    m_ctImageData = imageData;
-    m_ctDimensions = {volume.width, volume.height, volume.depth};
+    clearVolumeGeometry();
+    m_volumeDimensions = {volume.width, volume.height, volume.depth};
     for (int axis = 0; axis < 3; ++axis) {
-        m_ctSpacing[static_cast<size_t>(axis)] = volume.spacing[static_cast<size_t>(axis)];
-        m_ctOrigin[static_cast<size_t>(axis)] = volume.origin[static_cast<size_t>(axis)];
+        m_volumeSpacing[static_cast<size_t>(axis)] = volume.spacing[static_cast<size_t>(axis)];
+        m_volumeOrigin[static_cast<size_t>(axis)] = volume.origin[static_cast<size_t>(axis)];
+        const int maximum = std::max(0, m_volumeDimensions[static_cast<size_t>(axis)] - 1);
+        m_positionPlaneSlices[static_cast<size_t>(axis)] = std::clamp(
+            m_positionPlaneSlices[static_cast<size_t>(axis)], 0, maximum);
     }
-    std::copy(volume.direction.cbegin(), volume.direction.cend(), m_ctDirection.begin());
-    m_hasCtVolume = true;
-    m_ctMaskGeometryAligned = false;
+    std::copy(volume.direction.cbegin(), volume.direction.cend(), m_volumeDirection.begin());
+    m_hasVolumeGeometry = true;
+    m_volumeMaskGeometryAligned = false;
 
-    for (int orientation = 0; orientation < 3; ++orientation) {
-        auto mapper = vtkSmartPointer<vtkImageSliceMapper>::New();
-        mapper->SetInputData(m_ctImageData);
-        mapper->SetOrientation(orientation);
-        mapper->CroppingOn();
+    // Axis order is X/Sagittal, Y/Coronal, Z/Axial.
+    static constexpr double fillColors[3][3] = {
+        {1.00, 0.15, 0.75},
+        {0.18, 0.95, 0.35},
+        {0.10, 0.78, 1.00}
+    };
+    static constexpr double fillOpacity[3] = {0.28, 0.26, 0.28};
 
-        auto actor = vtkSmartPointer<vtkImageSlice>::New();
-        actor->SetMapper(mapper);
-        actor->SetPickable(false);
-        actor->GetProperty()->SetColorWindow(std::max(1.0, windowWidth));
-        actor->GetProperty()->SetColorLevel(windowLevel);
-        actor->GetProperty()->SetInterpolationTypeToLinear();
+    for (int axis = 0; axis < 3; ++axis) {
+        const size_t plane = static_cast<size_t>(axis);
+        auto source = vtkSmartPointer<vtkPlaneSource>::New();
+        source->SetXResolution(1);
+        source->SetYResolution(1);
 
-        m_ctPlaneMappers[static_cast<size_t>(orientation)] = mapper;
-        m_ctPlaneActors[static_cast<size_t>(orientation)] = actor;
-        m_renderer->AddViewProp(actor);
-        setCtPlaneSlice(orientation, m_ctPlaneSlices[static_cast<size_t>(orientation)]);
+        auto fillMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        fillMapper->SetInputConnection(source->GetOutputPort());
+        fillMapper->ScalarVisibilityOff();
+
+        auto fillActor = vtkSmartPointer<vtkActor>::New();
+        fillActor->SetMapper(fillMapper);
+        fillActor->SetPickable(false);
+        fillActor->SetUseBounds(false);
+        fillActor->GetProperty()->SetColor(fillColors[axis][0],
+                                           fillColors[axis][1],
+                                           fillColors[axis][2]);
+        fillActor->GetProperty()->SetRepresentationToSurface();
+        fillActor->GetProperty()->SetOpacity(fillOpacity[axis]);
+        fillActor->GetProperty()->LightingOff();
+        fillActor->GetProperty()->SetAmbient(1.0);
+        fillActor->GetProperty()->SetDiffuse(0.0);
+        fillActor->GetProperty()->SetSpecular(0.0);
+        fillActor->GetProperty()->BackfaceCullingOff();
+        fillActor->GetProperty()->FrontfaceCullingOff();
+
+        auto borderPoints = vtkSmartPointer<vtkPoints>::New();
+        borderPoints->SetNumberOfPoints(4);
+
+        auto borderLine = vtkSmartPointer<vtkPolyLine>::New();
+        borderLine->GetPointIds()->SetNumberOfIds(5);
+        for (vtkIdType point = 0; point < 4; ++point) {
+            borderLine->GetPointIds()->SetId(point, point);
+        }
+        borderLine->GetPointIds()->SetId(4, 0);
+
+        auto borderLines = vtkSmartPointer<vtkCellArray>::New();
+        borderLines->InsertNextCell(borderLine);
+
+        auto borderData = vtkSmartPointer<vtkPolyData>::New();
+        borderData->SetPoints(borderPoints);
+        borderData->SetLines(borderLines);
+
+        auto borderMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        borderMapper->SetInputData(borderData);
+        borderMapper->ScalarVisibilityOff();
+
+        auto borderActor = vtkSmartPointer<vtkActor>::New();
+        borderActor->SetMapper(borderMapper);
+        borderActor->SetPickable(false);
+        borderActor->SetUseBounds(false);
+        borderActor->GetProperty()->SetColor(fillColors[axis][0],
+                                             fillColors[axis][1],
+                                             fillColors[axis][2]);
+        borderActor->GetProperty()->SetOpacity(0.95);
+        borderActor->GetProperty()->SetLineWidth(2.0);
+        borderActor->GetProperty()->LightingOff();
+
+        m_positionPlaneSources[plane] = source;
+        m_positionPlaneFillMappers[plane] = fillMapper;
+        m_positionPlaneFillActors[plane] = fillActor;
+        m_positionPlaneBorderPoints[plane] = borderPoints;
+        m_positionPlaneBorderData[plane] = borderData;
+        m_positionPlaneBorderMappers[plane] = borderMapper;
+        m_positionPlaneBorderActors[plane] = borderActor;
+        m_renderer->AddActor(fillActor);
+        m_renderer->AddActor(borderActor);
     }
-    updateCtPlaneVisibility();
+
+    updateAllPositionPlaneGeometry();
+    updatePositionPlaneVisibility();
     m_renderWindow->Render();
 
-    qInfo() << "Configured 3D CT planes"
+    qInfo() << "Configured solid-color 3D position planes"
             << volume.width << "x" << volume.height << "x" << volume.depth
-            << "spacing=" << m_ctSpacing[0] << m_ctSpacing[1] << m_ctSpacing[2]
-            << "origin=" << m_ctOrigin[0] << m_ctOrigin[1] << m_ctOrigin[2]
-            << "window/level=" << windowWidth << windowLevel;
+            << "spacing=" << m_volumeSpacing[0] << m_volumeSpacing[1] << m_volumeSpacing[2]
+            << "origin=" << m_volumeOrigin[0] << m_volumeOrigin[1] << m_volumeOrigin[2];
 }
 
-void Mask3DViewerWidget::setCtPlaneSlice(int orientation, int index)
+std::array<double, 3> Mask3DViewerWidget::indexToWorld(
+    const std::array<double, 3> &index) const
 {
-    if (orientation < 0 || orientation > 2) {
+    std::array<double, 3> world = m_volumeOrigin;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            world[static_cast<size_t>(row)] +=
+                m_volumeDirection[static_cast<size_t>(row * 3 + column)]
+                * index[static_cast<size_t>(column)]
+                * m_volumeSpacing[static_cast<size_t>(column)];
+        }
+    }
+    return world;
+}
+
+void Mask3DViewerWidget::setPositionPlaneSlice(int axis, int index)
+{
+    if (axis < 0 || axis > 2) {
         return;
     }
-    const size_t plane = static_cast<size_t>(orientation);
-    const int maximum = std::max(0, m_ctDimensions[plane] - 1);
-    m_ctPlaneSlices[plane] = std::clamp(index, 0, maximum);
-    if (m_ctPlaneMappers[plane]) {
-        m_ctPlaneMappers[plane]->SetSliceNumber(m_ctPlaneSlices[plane]);
-        updateCtPlaneCropping();
+    const size_t plane = static_cast<size_t>(axis);
+    const int maximum = std::max(0, m_volumeDimensions[plane] - 1);
+    m_positionPlaneSlices[plane] = std::clamp(index, 0, maximum);
+    if (m_positionPlaneSources[plane]) {
+        updatePositionPlaneGeometry(axis);
         m_renderWindow->Render();
     }
 }
 
 void Mask3DViewerWidget::setAxialSlice(int index)
 {
-    setCtPlaneSlice(2, index);
+    setPositionPlaneSlice(2, index);
 }
 
 void Mask3DViewerWidget::setCoronalSlice(int index)
 {
-    setCtPlaneSlice(1, index);
+    setPositionPlaneSlice(1, index);
 }
 
 void Mask3DViewerWidget::setSagittalSlice(int index)
 {
-    setCtPlaneSlice(0, index);
+    setPositionPlaneSlice(0, index);
 }
 
-void Mask3DViewerWidget::setCtPlaneVisible(int orientation, bool visible)
+void Mask3DViewerWidget::setPositionPlaneVisible(int axis, bool visible)
 {
-    if (orientation < 0 || orientation > 2) {
+    if (axis < 0 || axis > 2) {
         return;
     }
-    m_ctPlaneVisibilityRequested[static_cast<size_t>(orientation)] = visible;
-    updateCtPlaneVisibility();
+    m_positionPlaneVisibilityRequested[static_cast<size_t>(axis)] = visible;
+    updatePositionPlaneVisibility();
     m_renderWindow->Render();
 }
 
 void Mask3DViewerWidget::setAxialPlaneVisible(bool visible)
 {
-    setCtPlaneVisible(2, visible);
+    setPositionPlaneVisible(2, visible);
 }
 
 void Mask3DViewerWidget::setCoronalPlaneVisible(bool visible)
 {
-    setCtPlaneVisible(1, visible);
+    setPositionPlaneVisible(1, visible);
 }
 
 void Mask3DViewerWidget::setSagittalPlaneVisible(bool visible)
 {
-    setCtPlaneVisible(0, visible);
+    setPositionPlaneVisible(0, visible);
 }
 
-void Mask3DViewerWidget::updateCtPlaneVisibility()
+void Mask3DViewerWidget::updatePositionPlaneGeometry(int axis)
 {
-    const bool geometryReady = m_hasCtVolume && m_ctMaskGeometryAligned
-        && m_hasSurfaceFrameBounds;
-    for (int orientation = 0; orientation < 3; ++orientation) {
-        const size_t plane = static_cast<size_t>(orientation);
-        if (m_ctPlaneActors[plane]) {
-            m_ctPlaneActors[plane]->SetVisibility(
-                geometryReady && m_ctPlaneVisibilityRequested[plane]);
-        }
+    if (axis < 0 || axis > 2 || !m_hasVolumeGeometry || !m_hasSurfaceFrameBounds) {
+        return;
     }
-}
-
-void Mask3DViewerWidget::updateCtPlaneCropping()
-{
-    if (!m_hasCtVolume || !m_hasSurfaceFrameBounds) {
+    vtkPlaneSource *source = m_positionPlaneSources[static_cast<size_t>(axis)];
+    vtkPoints *borderPoints = m_positionPlaneBorderPoints[static_cast<size_t>(axis)];
+    vtkPolyData *borderData = m_positionPlaneBorderData[static_cast<size_t>(axis)];
+    if (!source || !borderPoints || !borderData) {
         return;
     }
 
-    int roiExtent[6] = {};
-    for (int axis = 0; axis < 3; ++axis) {
-        const double lower = (m_surfaceFrameBounds[axis * 2] - m_ctOrigin[static_cast<size_t>(axis)])
-            / m_ctSpacing[static_cast<size_t>(axis)];
-        const double upper = (m_surfaceFrameBounds[axis * 2 + 1] - m_ctOrigin[static_cast<size_t>(axis)])
-            / m_ctSpacing[static_cast<size_t>(axis)];
-        roiExtent[axis * 2] = std::clamp(static_cast<int>(std::floor(lower)),
-                                         0,
-                                         m_ctDimensions[static_cast<size_t>(axis)] - 1);
-        roiExtent[axis * 2 + 1] = std::clamp(static_cast<int>(std::ceil(upper)),
-                                             0,
-                                             m_ctDimensions[static_cast<size_t>(axis)] - 1);
+    std::array<double, 3> sliceIndex = {0.0, 0.0, 0.0};
+    sliceIndex[static_cast<size_t>(axis)] =
+        static_cast<double>(m_positionPlaneSlices[static_cast<size_t>(axis)]);
+    const std::array<double, 3> sliceWorld = indexToWorld(sliceIndex);
+    PlaneCorners corners = {};
+
+    switch (axis) {
+    case 0: // Sagittal: fixed world X, spans Y/Z guide bounds.
+        corners = {{{sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[4]},
+                    {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[4]},
+                    {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[5]},
+                    {sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[5]}}};
+        break;
+    case 1: // Coronal: fixed world Y, spans X/Z guide bounds.
+        corners = {{{m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[4]},
+                    {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[4]},
+                    {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[5]},
+                    {m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[5]}}};
+        break;
+    case 2: // Axial: fixed world Z, spans X/Y guide bounds.
+        corners = {{{m_surfaceFrameBounds[0], m_surfaceFrameBounds[2], sliceWorld[2]},
+                    {m_surfaceFrameBounds[1], m_surfaceFrameBounds[2], sliceWorld[2]},
+                    {m_surfaceFrameBounds[1], m_surfaceFrameBounds[3], sliceWorld[2]},
+                    {m_surfaceFrameBounds[0], m_surfaceFrameBounds[3], sliceWorld[2]}}};
+        break;
     }
 
-    for (int orientation = 0; orientation < 3; ++orientation) {
-        const size_t plane = static_cast<size_t>(orientation);
-        if (!m_ctPlaneMappers[plane]) {
-            continue;
-        }
-        int planeExtent[6];
-        std::copy(roiExtent, roiExtent + 6, planeExtent);
-        planeExtent[orientation * 2] = m_ctPlaneSlices[plane];
-        planeExtent[orientation * 2 + 1] = m_ctPlaneSlices[plane];
-        m_ctPlaneMappers[plane]->SetCroppingRegion(planeExtent);
-        m_ctPlaneMappers[plane]->Modified();
+    logPositionPlaneState("before update",
+                          axis,
+                          m_positionPlaneSlices[static_cast<size_t>(axis)],
+                          source,
+                          m_positionPlaneFillMappers[static_cast<size_t>(axis)],
+                          m_positionPlaneFillActors[static_cast<size_t>(axis)],
+                          borderData,
+                          corners);
+
+    source->SetOrigin(corners[0].data());
+    source->SetPoint1(corners[1].data());
+    source->SetPoint2(corners[3].data());
+    source->Modified();
+    source->Update();
+
+    for (vtkIdType corner = 0; corner < 4; ++corner) {
+        borderPoints->SetPoint(corner, corners[static_cast<size_t>(corner)].data());
+    }
+    borderPoints->Modified();
+    borderData->Modified();
+
+    logPositionPlaneState("after update",
+                          axis,
+                          m_positionPlaneSlices[static_cast<size_t>(axis)],
+                          source,
+                          m_positionPlaneFillMappers[static_cast<size_t>(axis)],
+                          m_positionPlaneFillActors[static_cast<size_t>(axis)],
+                          borderData,
+                          corners);
+}
+
+void Mask3DViewerWidget::updateAllPositionPlaneGeometry()
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        updatePositionPlaneGeometry(axis);
     }
 }
 
-bool Mask3DViewerWidget::ctGeometryMatchesMask(const MaskVolume &mask) const
+void Mask3DViewerWidget::updatePositionPlaneVisibility()
 {
-    if (!m_hasCtVolume || !mask.isValid()
-        || mask.width != m_ctDimensions[0]
-        || mask.height != m_ctDimensions[1]
-        || mask.depth != m_ctDimensions[2]
+    const bool geometryReady = m_hasVolumeGeometry && m_volumeMaskGeometryAligned
+        && m_hasSurfaceFrameBounds;
+    for (int axis = 0; axis < 3; ++axis) {
+        const size_t plane = static_cast<size_t>(axis);
+        const bool visible = geometryReady && m_positionPlaneVisibilityRequested[plane];
+        if (m_positionPlaneFillActors[plane]) {
+            m_positionPlaneFillActors[plane]->SetVisibility(visible);
+        }
+        if (m_positionPlaneBorderActors[plane]) {
+            m_positionPlaneBorderActors[plane]->SetVisibility(visible);
+        }
+    }
+}
+
+bool Mask3DViewerWidget::volumeGeometryMatchesMask(const MaskVolume &mask) const
+{
+    if (!m_hasVolumeGeometry || !mask.isValid()
+        || mask.width != m_volumeDimensions[0]
+        || mask.height != m_volumeDimensions[1]
+        || mask.depth != m_volumeDimensions[2]
         || mask.spacing.size() != 3
         || mask.origin.size() != 3
         || !directionIsIdentity(mask.direction)) {
@@ -823,14 +997,14 @@ bool Mask3DViewerWidget::ctGeometryMatchesMask(const MaskVolume &mask) const
     for (int axis = 0; axis < 3; ++axis) {
         if (!std::isfinite(mask.spacing[static_cast<size_t>(axis)])
             || !std::isfinite(mask.origin[static_cast<size_t>(axis)])
-            || !nearlyEqual(mask.spacing[static_cast<size_t>(axis)], m_ctSpacing[static_cast<size_t>(axis)])
-            || !nearlyEqual(mask.origin[static_cast<size_t>(axis)], m_ctOrigin[static_cast<size_t>(axis)])) {
+            || !nearlyEqual(mask.spacing[static_cast<size_t>(axis)], m_volumeSpacing[static_cast<size_t>(axis)])
+            || !nearlyEqual(mask.origin[static_cast<size_t>(axis)], m_volumeOrigin[static_cast<size_t>(axis)])) {
             return false;
         }
     }
     for (int index = 0; index < 9; ++index) {
         if (!nearlyEqual(mask.direction[static_cast<size_t>(index)],
-                         m_ctDirection[static_cast<size_t>(index)])) {
+                         m_volumeDirection[static_cast<size_t>(index)])) {
             return false;
         }
     }
@@ -864,9 +1038,9 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
         return;
     }
 
-    m_ctMaskGeometryAligned = ctGeometryMatchesMask(mask);
-    if (m_hasCtVolume && !m_ctMaskGeometryAligned) {
-        qWarning() << "3D CT planes disabled: CT and mask physical geometry do not match,"
+    m_volumeMaskGeometryAligned = volumeGeometryMatchesMask(mask);
+    if (m_hasVolumeGeometry && !m_volumeMaskGeometryAligned) {
+        qWarning() << "3D position planes disabled: volume and mask physical geometry do not match,"
                       " or direction is not identity.";
     }
     updateOrientationLabels(mask);

@@ -178,7 +178,7 @@ private:
     void updateZoomLabel(ViewOrientation orientation);
     void updateGlobalZoomLabel();
     void refresh3DMaskSurface();
-    void configure3DCtPlanes();
+    void configure3DPositionPlanes();
     void update3DPlaneSlice(ViewOrientation orientation, int sliceIndex);
     void handleViewWheel(ViewOrientation orientation, QWheelEvent *event);
     void handleViewResized(ViewOrientation orientation);

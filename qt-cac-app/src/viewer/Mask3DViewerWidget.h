@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPointF>
 #include <QWidget>
 
 #include "data/MaskVolume.h"
@@ -16,6 +17,7 @@
 class QVTKOpenGLNativeWidget;
 class StrictTrackballCameraStyle;
 class vtkAnnotatedCubeActor;
+class vtkCellPicker;
 class vtkOrientationMarkerWidget;
 class vtkPlaneSource;
 class vtkPoints;
@@ -40,6 +42,7 @@ public:
     void setAxialPlaneVisible(bool visible);
     void setCoronalPlaneVisible(bool visible);
     void setSagittalPlaneVisible(bool visible);
+    void setMovePlanesEnabled(bool enabled);
     void updateMaskIntersections(const MaskVolume &mask,
                                  bool updateAxial,
                                  bool updateCoronal,
@@ -51,10 +54,29 @@ public:
 
 signals:
     void viewportDoubleClicked();
+    void axialPlaneSliceRequested(int index);
+    void coronalPlaneSliceRequested(int index);
+    void sagittalPlaneSliceRequested(int index);
 
 private:
+    enum class DraggedPlane {
+        None,
+        Sagittal,
+        Coronal,
+        Axial
+    };
+
     bool anyMouseButtonDown() const;
     void forceEndInteraction();
+    bool beginPlaneDrag(const QPointF &widgetPosition);
+    void updatePlaneDrag(const QPointF &widgetPosition);
+    void endPlaneDrag();
+    void updatePlanePickerList();
+    void setPlaneDragHighlight(int axis, bool highlighted);
+    int draggedPlaneAxis() const;
+    QPointF widgetToVtkDisplay(const QPointF &widgetPosition) const;
+    bool worldToDisplay(const std::array<double, 3> &world, QPointF *display) const;
+    std::array<double, 3> worldToContinuousIndex(const std::array<double, 3> &world) const;
     void setupOrientationMarker();
     void updateOrientationLabels(const MaskVolume &mask);
     void setOrientationLabels(const char *const plusLabels[3], const char *const minusLabels[3]);
@@ -76,6 +98,7 @@ private:
     vtkNew<vtkGenericOpenGLRenderWindow> m_renderWindow;
     vtkNew<vtkRenderer> m_renderer;
     vtkSmartPointer<StrictTrackballCameraStyle> m_interactorStyle;
+    vtkSmartPointer<vtkCellPicker> m_planePicker;
     vtkSmartPointer<vtkActor> m_maskActor;
     vtkSmartPointer<vtkAnnotatedCubeActor> m_orientationCube;
     vtkSmartPointer<vtkOrientationMarkerWidget> m_orientationMarker;
@@ -109,4 +132,13 @@ private:
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;
     bool m_rightButtonDown = false;
+    bool m_movePlanesEnabled = false;
+    bool m_planeDragActive = false;
+    bool m_planeDragProjectionValid = false;
+    DraggedPlane m_draggedPlane = DraggedPlane::None;
+    QPointF m_planeDragStartDisplayPosition;
+    QPointF m_planeDragDisplayPerSlice;
+    std::array<double, 3> m_planeDragStartWorldPosition = {0.0, 0.0, 0.0};
+    std::array<double, 3> m_planeDragNormal = {0.0, 0.0, 1.0};
+    int m_lastRequestedPlaneSlice = -1;
 };

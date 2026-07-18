@@ -235,6 +235,7 @@ private:
     QCheckBox *m_showAxial3DPlaneCheckBox = nullptr;
     QCheckBox *m_showCoronal3DPlaneCheckBox = nullptr;
     QCheckBox *m_showSagittal3DPlaneCheckBox = nullptr;
+    QCheckBox *m_move3DPlanesCheckBox = nullptr;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
     QWidget *m_threeDPanel = nullptr;

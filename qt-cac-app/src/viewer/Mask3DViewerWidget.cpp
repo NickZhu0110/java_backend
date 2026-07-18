@@ -14,6 +14,7 @@
 #include <vtkCamera.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCellArray.h>
+#include <vtkCellPicker.h>
 #include <vtkCommand.h>
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkGenericOpenGLRenderWindow.h>
@@ -153,6 +154,14 @@ constexpr bool kVerbose3DMouseLogs = false;
 constexpr bool kVerbose3DLogs = false;
 constexpr bool kVerbosePlaneRenderingLogs = false;
 constexpr double kGeometryTolerance = 1e-6;
+constexpr double kMinimumProjectedSlicePixels = 0.2;
+constexpr double kPlaneBorderWidth = 2.0;
+constexpr double kSelectedPlaneBorderWidth = 4.0;
+constexpr double kPlaneColors[3][3] = {
+    {1.00, 0.15, 0.75},
+    {0.18, 0.95, 0.35},
+    {0.10, 0.78, 1.00}
+};
 
 using PlaneCorners = std::array<std::array<double, 3>, 4>;
 
@@ -276,6 +285,9 @@ Mask3DViewerWidget::Mask3DViewerWidget(QWidget *parent)
     m_vtkWidget->setRenderWindow(m_renderWindow);
     m_interactorStyle = vtkSmartPointer<StrictTrackballCameraStyle>::New();
     m_vtkWidget->interactor()->SetInteractorStyle(m_interactorStyle);
+    m_planePicker = vtkSmartPointer<vtkCellPicker>::New();
+    m_planePicker->PickFromListOn();
+    m_planePicker->SetTolerance(0.005);
     m_renderer->SetBackground(0.05, 0.05, 0.06);
     m_renderWindow->AddRenderer(m_renderer);
     setupOrientationMarker();
@@ -450,6 +462,283 @@ void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
     }
 }
 
+int Mask3DViewerWidget::draggedPlaneAxis() const
+{
+    switch (m_draggedPlane) {
+    case DraggedPlane::Sagittal:
+        return 0;
+    case DraggedPlane::Coronal:
+        return 1;
+    case DraggedPlane::Axial:
+        return 2;
+    case DraggedPlane::None:
+        return -1;
+    }
+    return -1;
+}
+
+QPointF Mask3DViewerWidget::widgetToVtkDisplay(const QPointF &widgetPosition) const
+{
+    if (!m_vtkWidget || !m_renderWindow || m_vtkWidget->width() <= 0
+        || m_vtkWidget->height() <= 0) {
+        return {};
+    }
+
+    const int *renderSize = m_renderWindow->GetSize();
+    const double scaleX = renderSize && renderSize[0] > 0
+        ? static_cast<double>(renderSize[0]) / m_vtkWidget->width()
+        : 1.0;
+    const double scaleY = renderSize && renderSize[1] > 0
+        ? static_cast<double>(renderSize[1]) / m_vtkWidget->height()
+        : 1.0;
+    return {widgetPosition.x() * scaleX,
+            (m_vtkWidget->height() - 1.0 - widgetPosition.y()) * scaleY};
+}
+
+bool Mask3DViewerWidget::worldToDisplay(const std::array<double, 3> &world,
+                                        QPointF *display) const
+{
+    if (!display || !m_renderer) {
+        return false;
+    }
+    m_renderer->SetWorldPoint(world[0], world[1], world[2], 1.0);
+    m_renderer->WorldToDisplay();
+    const double *displayPoint = m_renderer->GetDisplayPoint();
+    if (!displayPoint || !std::isfinite(displayPoint[0])
+        || !std::isfinite(displayPoint[1]) || !std::isfinite(displayPoint[2])) {
+        return false;
+    }
+    *display = QPointF(displayPoint[0], displayPoint[1]);
+    return true;
+}
+
+std::array<double, 3> Mask3DViewerWidget::worldToContinuousIndex(
+    const std::array<double, 3> &world) const
+{
+    std::array<double, 3> index = {0.0, 0.0, 0.0};
+    const std::array<double, 3> relative = {
+        world[0] - m_volumeOrigin[0],
+        world[1] - m_volumeOrigin[1],
+        world[2] - m_volumeOrigin[2]
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+        double projected = 0.0;
+        for (int row = 0; row < 3; ++row) {
+            projected += m_volumeDirection[static_cast<size_t>(row * 3 + axis)]
+                * relative[static_cast<size_t>(row)];
+        }
+        index[static_cast<size_t>(axis)] =
+            projected / m_volumeSpacing[static_cast<size_t>(axis)];
+    }
+    return index;
+}
+
+void Mask3DViewerWidget::setPlaneDragHighlight(int axis, bool highlighted)
+{
+    if (axis < 0 || axis > 2) {
+        return;
+    }
+    vtkActor *borderActor = m_positionPlaneBorderActors[static_cast<size_t>(axis)];
+    if (!borderActor) {
+        return;
+    }
+    vtkProperty *property = borderActor->GetProperty();
+    if (highlighted) {
+        property->SetColor(1.0, 1.0, 1.0);
+        property->SetLineWidth(kSelectedPlaneBorderWidth);
+    } else {
+        property->SetColor(kPlaneColors[axis][0], kPlaneColors[axis][1], kPlaneColors[axis][2]);
+        property->SetLineWidth(kPlaneBorderWidth);
+    }
+}
+
+void Mask3DViewerWidget::updatePlanePickerList()
+{
+    if (!m_planePicker) {
+        return;
+    }
+    m_planePicker->InitializePickList();
+    for (int axis = 0; axis < 3; ++axis) {
+        vtkActor *fillActor = m_positionPlaneFillActors[static_cast<size_t>(axis)];
+        const bool pickable = m_movePlanesEnabled && fillActor
+            && fillActor->GetVisibility()
+            && m_positionPlaneVisibilityRequested[static_cast<size_t>(axis)];
+        if (fillActor) {
+            fillActor->SetPickable(pickable);
+        }
+        if (pickable) {
+            m_planePicker->AddPickList(fillActor);
+        }
+    }
+}
+
+bool Mask3DViewerWidget::beginPlaneDrag(const QPointF &widgetPosition)
+{
+    if (!m_movePlanesEnabled || !m_hasVolumeGeometry || !m_volumeMaskGeometryAligned
+        || !m_hasSurfaceFrameBounds || !m_planePicker || !m_renderer) {
+        return false;
+    }
+
+    const QPointF displayPosition = widgetToVtkDisplay(widgetPosition);
+    if (!m_planePicker->Pick(displayPosition.x(), displayPosition.y(), 0.0, m_renderer)) {
+        return false;
+    }
+
+    vtkActor *pickedActor = m_planePicker->GetActor();
+    int axis = -1;
+    for (int candidateAxis = 0; candidateAxis < 3; ++candidateAxis) {
+        if (pickedActor == m_positionPlaneFillActors[static_cast<size_t>(candidateAxis)]
+            && pickedActor && pickedActor->GetVisibility()) {
+            axis = candidateAxis;
+            break;
+        }
+    }
+    if (axis < 0) {
+        return false;
+    }
+
+    m_draggedPlane = axis == 0 ? DraggedPlane::Sagittal
+        : axis == 1 ? DraggedPlane::Coronal
+                    : DraggedPlane::Axial;
+    m_planeDragActive = true;
+    m_planeDragStartDisplayPosition = displayPosition;
+    m_lastRequestedPlaneSlice = m_positionPlaneSlices[static_cast<size_t>(axis)];
+
+    const double *pickPosition = m_planePicker->GetPickPosition();
+    m_planeDragStartWorldPosition = {pickPosition[0], pickPosition[1], pickPosition[2]};
+    double normalLengthSquared = 0.0;
+    for (int row = 0; row < 3; ++row) {
+        const double component = m_volumeDirection[static_cast<size_t>(row * 3 + axis)];
+        m_planeDragNormal[static_cast<size_t>(row)] = component;
+        normalLengthSquared += component * component;
+    }
+    const double normalLength = std::sqrt(normalLengthSquared);
+    if (normalLength > kGeometryTolerance) {
+        for (double &component : m_planeDragNormal) {
+            component /= normalLength;
+        }
+    }
+
+    constexpr int referenceSliceCount = 8;
+    std::array<double, 3> referenceWorld = m_planeDragStartWorldPosition;
+    for (int component = 0; component < 3; ++component) {
+        referenceWorld[static_cast<size_t>(component)] +=
+            m_planeDragNormal[static_cast<size_t>(component)]
+            * m_volumeSpacing[static_cast<size_t>(axis)] * referenceSliceCount;
+    }
+    QPointF anchorDisplay;
+    QPointF referenceDisplay;
+    m_planeDragProjectionValid = worldToDisplay(m_planeDragStartWorldPosition, &anchorDisplay)
+        && worldToDisplay(referenceWorld, &referenceDisplay);
+    if (m_planeDragProjectionValid) {
+        m_planeDragDisplayPerSlice =
+            (referenceDisplay - anchorDisplay) / static_cast<double>(referenceSliceCount);
+        const double projectedLength = std::hypot(m_planeDragDisplayPerSlice.x(),
+                                                   m_planeDragDisplayPerSlice.y());
+        m_planeDragProjectionValid = projectedLength >= kMinimumProjectedSlicePixels;
+    }
+    if (!m_planeDragProjectionValid) {
+        qWarning() << planeName(axis)
+                   << "plane drag paused: slice normal projects too close to the camera view direction.";
+    }
+
+    setPlaneDragHighlight(axis, true);
+    m_vtkWidget->setCursor(Qt::ClosedHandCursor);
+    m_renderWindow->Render();
+    return true;
+}
+
+void Mask3DViewerWidget::updatePlaneDrag(const QPointF &widgetPosition)
+{
+    const int axis = draggedPlaneAxis();
+    if (!m_planeDragActive || axis < 0 || !m_planeDragProjectionValid) {
+        return;
+    }
+
+    const QPointF displayDelta =
+        widgetToVtkDisplay(widgetPosition) - m_planeDragStartDisplayPosition;
+    const double projectionLengthSquared =
+        QPointF::dotProduct(m_planeDragDisplayPerSlice, m_planeDragDisplayPerSlice);
+    if (projectionLengthSquared
+        < kMinimumProjectedSlicePixels * kMinimumProjectedSlicePixels) {
+        return;
+    }
+
+    const double continuousSliceDelta =
+        QPointF::dotProduct(displayDelta, m_planeDragDisplayPerSlice)
+        / projectionLengthSquared;
+    std::array<double, 3> candidateWorld = m_planeDragStartWorldPosition;
+    for (int component = 0; component < 3; ++component) {
+        candidateWorld[static_cast<size_t>(component)] +=
+            m_planeDragNormal[static_cast<size_t>(component)]
+            * continuousSliceDelta * m_volumeSpacing[static_cast<size_t>(axis)];
+    }
+    const std::array<double, 3> continuousIndex = worldToContinuousIndex(candidateWorld);
+    const int maximum = std::max(0, m_volumeDimensions[static_cast<size_t>(axis)] - 1);
+    const int requestedSlice = std::clamp(
+        static_cast<int>(std::lround(continuousIndex[static_cast<size_t>(axis)])),
+        0,
+        maximum);
+    if (requestedSlice == m_lastRequestedPlaneSlice) {
+        return;
+    }
+    m_lastRequestedPlaneSlice = requestedSlice;
+
+    switch (m_draggedPlane) {
+    case DraggedPlane::Axial:
+        emit axialPlaneSliceRequested(requestedSlice);
+        break;
+    case DraggedPlane::Coronal:
+        emit coronalPlaneSliceRequested(requestedSlice);
+        break;
+    case DraggedPlane::Sagittal:
+        emit sagittalPlaneSliceRequested(requestedSlice);
+        break;
+    case DraggedPlane::None:
+        break;
+    }
+}
+
+void Mask3DViewerWidget::endPlaneDrag()
+{
+    const int axis = draggedPlaneAxis();
+    const bool wasActive = m_planeDragActive;
+    m_planeDragActive = false;
+    m_planeDragProjectionValid = false;
+    m_draggedPlane = DraggedPlane::None;
+    m_lastRequestedPlaneSlice = -1;
+    if (axis >= 0) {
+        setPlaneDragHighlight(axis, false);
+    }
+    if (m_vtkWidget) {
+        if (m_movePlanesEnabled) {
+            m_vtkWidget->setCursor(Qt::OpenHandCursor);
+        } else {
+            m_vtkWidget->unsetCursor();
+        }
+    }
+    if (wasActive && m_renderWindow) {
+        m_renderWindow->Render();
+    }
+}
+
+void Mask3DViewerWidget::setMovePlanesEnabled(bool enabled)
+{
+    if (m_movePlanesEnabled == enabled) {
+        return;
+    }
+    endPlaneDrag();
+    m_movePlanesEnabled = enabled;
+    updatePlanePickerList();
+    if (m_vtkWidget) {
+        if (enabled) {
+            m_vtkWidget->setCursor(Qt::OpenHandCursor);
+        } else {
+            m_vtkWidget->unsetCursor();
+        }
+    }
+}
+
 bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched != m_vtkWidget) {
@@ -460,6 +749,18 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
     case QEvent::MouseMove: {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         const Qt::MouseButtons buttons = mouseEvent->buttons();
+        if (m_planeDragActive) {
+            if (buttons.testFlag(Qt::LeftButton)
+                && !mouseEvent->modifiers().testFlag(Qt::ShiftModifier)) {
+                updatePlaneDrag(mouseEvent->position());
+            } else {
+                endPlaneDrag();
+                m_leftButtonDown = false;
+                forceEndInteraction();
+            }
+            mouseEvent->accept();
+            return true;
+        }
         if (buttons == Qt::NoButton) {
             if (anyMouseButtonDown()) {
                 m_leftButtonDown = false;
@@ -484,6 +785,7 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
         return false;
     }
     case QEvent::MouseButtonDblClick:
+        endPlaneDrag();
         m_leftButtonDown = false;
         m_middleButtonDown = false;
         m_rightButtonDown = false;
@@ -494,6 +796,16 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
     case QEvent::MouseButtonPress: {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {
+            if (!mouseEvent->modifiers().testFlag(Qt::ShiftModifier)
+                && beginPlaneDrag(mouseEvent->position())) {
+                m_leftButtonDown = false;
+                if (m_interactorStyle) {
+                    m_interactorStyle->setShiftLeftPanRequested(false);
+                }
+                forceEndInteraction();
+                mouseEvent->accept();
+                return true;
+            }
             m_leftButtonDown = true;
             if (m_interactorStyle) {
                 m_interactorStyle->setShiftLeftPanRequested(
@@ -512,6 +824,15 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
     }
     case QEvent::MouseButtonRelease: {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (m_planeDragActive && mouseEvent->button() == Qt::LeftButton) {
+            endPlaneDrag();
+            m_leftButtonDown = false;
+            m_middleButtonDown = false;
+            m_rightButtonDown = false;
+            forceEndInteraction();
+            mouseEvent->accept();
+            return true;
+        }
         if (mouseEvent->button() == Qt::LeftButton) {
             m_leftButtonDown = false;
         } else if (mouseEvent->button() == Qt::MiddleButton) {
@@ -537,6 +858,7 @@ bool Mask3DViewerWidget::eventFilter(QObject *watched, QEvent *event)
     }
     case QEvent::Leave:
     case QEvent::FocusOut:
+        endPlaneDrag();
         m_leftButtonDown = false;
         m_middleButtonDown = false;
         m_rightButtonDown = false;
@@ -675,6 +997,10 @@ void Mask3DViewerWidget::resetCamera()
 
 void Mask3DViewerWidget::clearVolumeGeometry()
 {
+    endPlaneDrag();
+    if (m_planePicker) {
+        m_planePicker->InitializePickList();
+    }
     for (int axis = 0; axis < 3; ++axis) {
         const size_t plane = static_cast<size_t>(axis);
         if (m_positionPlaneFillActors[plane]) {
@@ -750,11 +1076,6 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
     m_volumeMaskGeometryAligned = false;
 
     // Axis order is X/Sagittal, Y/Coronal, Z/Axial.
-    static constexpr double fillColors[3][3] = {
-        {1.00, 0.15, 0.75},
-        {0.18, 0.95, 0.35},
-        {0.10, 0.78, 1.00}
-    };
     static constexpr double fillOpacity[3] = {0.28, 0.26, 0.28};
     static constexpr double intersectionColors[3][3] = {
         {1.00, 0.84, 0.98},
@@ -776,9 +1097,9 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
         fillActor->SetMapper(fillMapper);
         fillActor->SetPickable(false);
         fillActor->SetUseBounds(false);
-        fillActor->GetProperty()->SetColor(fillColors[axis][0],
-                                           fillColors[axis][1],
-                                           fillColors[axis][2]);
+        fillActor->GetProperty()->SetColor(kPlaneColors[axis][0],
+                                           kPlaneColors[axis][1],
+                                           kPlaneColors[axis][2]);
         fillActor->GetProperty()->SetRepresentationToSurface();
         fillActor->GetProperty()->SetOpacity(fillOpacity[axis]);
         fillActor->GetProperty()->LightingOff();
@@ -834,11 +1155,11 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
         borderActor->SetMapper(borderMapper);
         borderActor->SetPickable(false);
         borderActor->SetUseBounds(false);
-        borderActor->GetProperty()->SetColor(fillColors[axis][0],
-                                             fillColors[axis][1],
-                                             fillColors[axis][2]);
+        borderActor->GetProperty()->SetColor(kPlaneColors[axis][0],
+                                             kPlaneColors[axis][1],
+                                             kPlaneColors[axis][2]);
         borderActor->GetProperty()->SetOpacity(0.95);
-        borderActor->GetProperty()->SetLineWidth(2.0);
+        borderActor->GetProperty()->SetLineWidth(kPlaneBorderWidth);
         borderActor->GetProperty()->LightingOff();
 
         m_positionPlaneSources[plane] = source;
@@ -915,6 +1236,9 @@ void Mask3DViewerWidget::setPositionPlaneVisible(int axis, bool visible)
 {
     if (axis < 0 || axis > 2) {
         return;
+    }
+    if (!visible && m_planeDragActive && draggedPlaneAxis() == axis) {
+        endPlaneDrag();
     }
     m_positionPlaneVisibilityRequested[static_cast<size_t>(axis)] = visible;
     updatePositionPlaneVisibility();
@@ -1210,6 +1534,7 @@ void Mask3DViewerWidget::updatePositionPlaneVisibility()
             m_positionPlaneBorderActors[plane]->SetVisibility(visible);
         }
     }
+    updatePlanePickerList();
 }
 
 bool Mask3DViewerWidget::volumeGeometryMatchesMask(const MaskVolume &mask) const

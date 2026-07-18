@@ -543,12 +543,16 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_3DSurfaceOpacityLabel = new QLabel(QStringLiteral("90%"), container);
     m_3DSurfaceOpacityLabel->setMinimumWidth(38);
     m_3DSurfaceOpacityLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_showAxial3DPlaneCheckBox = new QCheckBox(QStringLiteral("Axial Plane"), container);
-    m_showCoronal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Coronal Plane"), container);
-    m_showSagittal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Sagittal Plane"), container);
+    m_showAxial3DPlaneCheckBox = new QCheckBox(QStringLiteral("Axial"), container);
+    m_showCoronal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Coronal"), container);
+    m_showSagittal3DPlaneCheckBox = new QCheckBox(QStringLiteral("Sagittal"), container);
+    m_move3DPlanesCheckBox = new QCheckBox(QStringLiteral("Move Planes"), container);
     m_showAxial3DPlaneCheckBox->setChecked(true);
     m_showCoronal3DPlaneCheckBox->setChecked(false);
     m_showSagittal3DPlaneCheckBox->setChecked(false);
+    m_move3DPlanesCheckBox->setChecked(false);
+    m_move3DPlanesCheckBox->setToolTip(
+        QStringLiteral("Drag visible slice planes to change the linked MPR slice"));
 
     auto *opacityLayout = new QHBoxLayout;
     opacityLayout->setContentsMargins(4, 0, 4, 0);
@@ -559,6 +563,7 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     opacityLayout->addWidget(m_showAxial3DPlaneCheckBox);
     opacityLayout->addWidget(m_showCoronal3DPlaneCheckBox);
     opacityLayout->addWidget(m_showSagittal3DPlaneCheckBox);
+    opacityLayout->addWidget(m_move3DPlanesCheckBox);
 
     connect(m_3DSurfaceOpacitySlider, &QSlider::valueChanged, this, [this](int value) {
         if (m_3DSurfaceOpacityLabel) {
@@ -571,12 +576,26 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     connect(m_mask3DViewer, &Mask3DViewerWidget::viewportDoubleClicked, this, [this]() {
         toggleViewportMaximized(ViewportId::ThreeD);
     });
+    connect(m_mask3DViewer, &Mask3DViewerWidget::axialPlaneSliceRequested,
+            this, [this](int index) {
+                setSliceIndex(ViewOrientation::Axial, index);
+            });
+    connect(m_mask3DViewer, &Mask3DViewerWidget::coronalPlaneSliceRequested,
+            this, [this](int index) {
+                setSliceIndex(ViewOrientation::Coronal, index);
+            });
+    connect(m_mask3DViewer, &Mask3DViewerWidget::sagittalPlaneSliceRequested,
+            this, [this](int index) {
+                setSliceIndex(ViewOrientation::Sagittal, index);
+            });
     connect(m_showAxial3DPlaneCheckBox, &QCheckBox::toggled,
             m_mask3DViewer, &Mask3DViewerWidget::setAxialPlaneVisible);
     connect(m_showCoronal3DPlaneCheckBox, &QCheckBox::toggled,
             m_mask3DViewer, &Mask3DViewerWidget::setCoronalPlaneVisible);
     connect(m_showSagittal3DPlaneCheckBox, &QCheckBox::toggled,
             m_mask3DViewer, &Mask3DViewerWidget::setSagittalPlaneVisible);
+    connect(m_move3DPlanesCheckBox, &QCheckBox::toggled,
+            m_mask3DViewer, &Mask3DViewerWidget::setMovePlanesEnabled);
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(4, 4, 4, 4);

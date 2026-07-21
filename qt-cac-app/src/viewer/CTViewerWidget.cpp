@@ -9,6 +9,7 @@
 #include <QCursor>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
@@ -19,6 +20,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
@@ -103,6 +105,30 @@ void CTViewerWidget::loadJobFilesFromCache(const QString &caseCacheDir)
     qInfo() << "Loading real CT volume into viewer"
             << loaded.volume.width << "x" << loaded.volume.height << "x" << loaded.volume.depth;
     setVolumeAndMask(loaded.volume, loaded.mask, loaded.hasMask);
+}
+
+bool CTViewerWidget::loadMultiStructurePreview(const QString &ctPath,
+                                               const QString &segmentationPath,
+                                               QString *errorMessage)
+{
+    if (!m_mask3DViewer) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("The 3D viewer is not available.");
+        }
+        return false;
+    }
+    if (!m_mask3DViewer->loadMultiStructurePreview(ctPath, segmentationPath, errorMessage)) {
+        return false;
+    }
+
+    rebuildMultiStructureControls();
+    setMultiStructurePreviewUiActive(true);
+    if (m_multiStructureStatusLabel) {
+        m_multiStructureStatusLabel->setText(
+            QStringLiteral("Native multi-label NIfTI preview (RAS): %1")
+                .arg(QFileInfo(segmentationPath).fileName()));
+    }
+    return true;
 }
 
 bool CTViewerWidget::hasUnsavedEdits() const
@@ -317,6 +343,8 @@ void CTViewerWidget::setupUi()
     m_refresh3DButton->setToolTip(QStringLiteral("Rebuild 3D mask surface from current working mask"));
     m_reset3DCameraButton = new QPushButton(QStringLiteral("Reset Camera"), this);
     m_reset3DCameraButton->setToolTip(QStringLiteral("Reset 3D camera"));
+    m_loadMultiStructureButton = new QPushButton(QStringLiteral("Load Multi-Structure"), this);
+    m_loadMultiStructureButton->setToolTip(QStringLiteral("Load a CT NIfTI and a categorical segmentation NIfTI for 3D preview"));
     for (QPushButton *button : {m_undoButton, m_redoButton, m_saveMaskButton, m_fitAllButton, m_refresh3DButton, m_reset3DCameraButton}) {
         button->setMinimumWidth(58);
         button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -342,6 +370,7 @@ void CTViewerWidget::setupUi()
     m_globalZoomSlider->setMinimumWidth(180);
     m_globalZoomLabel = new QLabel(QStringLiteral("Global 1.00x"), this);
     m_globalZoomLabel->setMinimumWidth(92);
+    m_loadMultiStructureButton->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
 
     auto *toolLayout = new QHBoxLayout;
     toolLayout->setContentsMargins(4, 4, 4, 0);
@@ -371,6 +400,7 @@ void CTViewerWidget::setupUi()
     zoomLayout->addWidget(m_globalZoomSlider, 1);
     zoomLayout->addWidget(m_globalZoomLabel);
     zoomLayout->addWidget(m_fitAllButton);
+    zoomLayout->addWidget(m_loadMultiStructureButton);
 
     auto *statusLayout = new QHBoxLayout;
     statusLayout->setContentsMargins(4, 0, 4, 4);
@@ -451,6 +481,8 @@ void CTViewerWidget::setupUi()
             m_mask3DViewer->resetCamera();
         }
     });
+    connect(m_loadMultiStructureButton, &QPushButton::clicked,
+            this, &CTViewerWidget::chooseMultiStructureFiles);
 
     updateToolState();
 }
@@ -550,6 +582,16 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_showCoronal3DPlaneCheckBox->setChecked(false);
     m_showSagittal3DPlaneCheckBox->setChecked(false);
 
+    m_multiStructureStatusLabel = new QLabel(container);
+    m_multiStructureStatusLabel->setWordWrap(true);
+    m_multiStructureStatusLabel->setVisible(false);
+    m_multiStructureControlsWidget = new QWidget(container);
+    m_multiStructureControlsLayout = new QGridLayout(m_multiStructureControlsWidget);
+    m_multiStructureControlsLayout->setContentsMargins(4, 0, 4, 0);
+    m_multiStructureControlsLayout->setHorizontalSpacing(6);
+    m_multiStructureControlsLayout->setVerticalSpacing(2);
+    m_multiStructureControlsWidget->setVisible(false);
+
     auto *opacityLayout = new QHBoxLayout;
     opacityLayout->setContentsMargins(4, 0, 4, 0);
     opacityLayout->setSpacing(6);
@@ -584,6 +626,8 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     layout->addWidget(titleLabel);
     layout->addWidget(m_mask3DViewer, 1);
     layout->addLayout(opacityLayout);
+    layout->addWidget(m_multiStructureStatusLabel);
+    layout->addWidget(m_multiStructureControlsWidget);
     return container;
 }
 
@@ -1023,13 +1067,152 @@ void CTViewerWidget::refresh3DMaskSurface()
     }
     if (m_hasWorkingMask && m_workingMask.isValid()) {
         m_mask3DViewer->refreshFromMask(m_workingMask);
+        clearMultiStructureControls();
+        setMultiStructurePreviewUiActive(false);
         return;
     }
     if (m_hasMask && m_aiMask.isValid()) {
         m_mask3DViewer->refreshFromMask(m_aiMask);
+        clearMultiStructureControls();
+        setMultiStructurePreviewUiActive(false);
         return;
     }
     m_mask3DViewer->clear();
+    clearMultiStructureControls();
+    setMultiStructurePreviewUiActive(false);
+}
+
+void CTViewerWidget::chooseMultiStructureFiles()
+{
+    const QString filter = QStringLiteral("NIfTI images (*.nii *.nii.gz);;All files (*)");
+    const QString ctPath = QFileDialog::getOpenFileName(this,
+                                                        QStringLiteral("Select CT NIfTI"),
+                                                        QString(),
+                                                        filter);
+    if (ctPath.isEmpty()) {
+        return;
+    }
+    const QString segmentationPath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Select categorical segmentation NIfTI"),
+        QFileInfo(ctPath).absolutePath(),
+        filter);
+    if (segmentationPath.isEmpty()) {
+        return;
+    }
+
+    QString errorMessage;
+    if (!loadMultiStructurePreview(ctPath, segmentationPath, &errorMessage)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("Multi-Structure Preview"),
+                             QStringLiteral("The preview was not changed.\n\n%1").arg(errorMessage));
+    }
+}
+
+void CTViewerWidget::rebuildMultiStructureControls()
+{
+    clearMultiStructureControls();
+    if (!m_mask3DViewer || !m_multiStructureControlsLayout) {
+        return;
+    }
+
+    const auto surfaceInfos = m_mask3DViewer->multiStructureSurfaces();
+    int row = 0;
+    for (const Mask3DViewerWidget::MultiStructureSurfaceInfo &info : surfaceInfos) {
+        auto *colorSwatch = new QLabel(m_multiStructureControlsWidget);
+        const QColor color = QColor::fromRgbF(info.color[0], info.color[1], info.color[2]);
+        colorSwatch->setFixedSize(12, 12);
+        colorSwatch->setStyleSheet(
+            QStringLiteral("background-color: %1; border: 1px solid #555;").arg(color.name()));
+
+        MultiStructureControl control;
+        control.labelValue = info.labelValue;
+        control.visibilityCheckBox = new QCheckBox(info.displayName, m_multiStructureControlsWidget);
+        control.visibilityCheckBox->setChecked(info.visible);
+        control.visibilityCheckBox->setToolTip(
+            QStringLiteral("%1 voxels; %2 points; %3 cells; extracted in %4 ms")
+                .arg(info.voxelCount)
+                .arg(info.pointCount)
+                .arg(info.cellCount)
+                .arg(info.extractionMilliseconds));
+        control.opacitySlider = new QSlider(Qt::Horizontal, m_multiStructureControlsWidget);
+        control.opacitySlider->setRange(0, 100);
+        control.opacitySlider->setValue(static_cast<int>(std::lround(info.opacity * 100.0)));
+        control.opacitySlider->setMinimumWidth(80);
+        control.opacitySlider->setToolTip(QStringLiteral("%1 opacity").arg(info.displayName));
+        control.opacityLabel = new QLabel(
+            QStringLiteral("%1%").arg(control.opacitySlider->value()),
+            m_multiStructureControlsWidget);
+        control.opacityLabel->setMinimumWidth(36);
+        control.opacityLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        connect(control.visibilityCheckBox, &QCheckBox::toggled, this,
+                [this, labelValue = info.labelValue](bool visible) {
+                    if (m_mask3DViewer) {
+                        m_mask3DViewer->setMultiStructureVisible(labelValue, visible);
+                    }
+                });
+        connect(control.opacitySlider, &QSlider::valueChanged, this,
+                [this, labelValue = info.labelValue, label = control.opacityLabel](int value) {
+                    label->setText(QStringLiteral("%1%").arg(value));
+                    if (m_mask3DViewer) {
+                        m_mask3DViewer->setMultiStructureOpacity(labelValue, value / 100.0);
+                    }
+                });
+
+        m_multiStructureControlsLayout->addWidget(colorSwatch, row, 0);
+        m_multiStructureControlsLayout->addWidget(control.visibilityCheckBox, row, 1);
+        m_multiStructureControlsLayout->addWidget(control.opacitySlider, row, 2);
+        m_multiStructureControlsLayout->addWidget(control.opacityLabel, row, 3);
+        m_multiStructureControls.push_back(control);
+        ++row;
+    }
+    m_multiStructureControlsLayout->setColumnStretch(2, 1);
+}
+
+void CTViewerWidget::clearMultiStructureControls()
+{
+    m_multiStructureControls.clear();
+    if (!m_multiStructureControlsLayout) {
+        return;
+    }
+    while (QLayoutItem *item = m_multiStructureControlsLayout->takeAt(0)) {
+        if (QWidget *widget = item->widget()) {
+            delete widget;
+        }
+        delete item;
+    }
+}
+
+void CTViewerWidget::setMultiStructurePreviewUiActive(bool active)
+{
+    if (m_multiStructureControlsWidget) {
+        m_multiStructureControlsWidget->setVisible(active);
+    }
+    if (m_multiStructureStatusLabel) {
+        m_multiStructureStatusLabel->setVisible(active);
+        if (!active) {
+            m_multiStructureStatusLabel->clear();
+        }
+    }
+    if (m_3DSurfaceOpacitySlider) {
+        m_3DSurfaceOpacitySlider->setEnabled(!active);
+    }
+    if (m_3DSurfaceOpacityLabel) {
+        m_3DSurfaceOpacityLabel->setEnabled(!active);
+    }
+    for (QCheckBox *planeCheckBox : {m_showAxial3DPlaneCheckBox,
+                                     m_showCoronal3DPlaneCheckBox,
+                                     m_showSagittal3DPlaneCheckBox}) {
+        if (planeCheckBox) {
+            planeCheckBox->setEnabled(!active);
+        }
+    }
+    if (m_refresh3DButton) {
+        m_refresh3DButton->setToolTip(active
+            ? QStringLiteral("Return to the current CAC working-mask surface")
+            : QStringLiteral("Rebuild 3D mask surface from current working mask"));
+    }
 }
 
 void CTViewerWidget::handleViewWheel(ViewOrientation orientation, QWheelEvent *event)

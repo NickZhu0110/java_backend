@@ -1,6 +1,8 @@
 #include "viewer/Mask3DViewerWidget.h"
+#include "viewer/MultiStructureNiftiLoader.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QMouseEvent>
 #include <QSizePolicy>
@@ -15,6 +17,7 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkDiscreteMarchingCubes.h>
+#include <vtkDiscreteFlyingEdges3D.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkImageData.h>
 #include <vtkImageProperty.h>
@@ -335,6 +338,15 @@ void Mask3DViewerWidget::updateOrientationLabels(const MaskVolume &mask)
             << "+Z=" << plusLabels[2] << "-Z=" << minusLabels[2];
 }
 
+void Mask3DViewerWidget::updateOrientationLabelsForRasWorld()
+{
+    static constexpr const char *plusLabels[3] = {"R", "A", "S"};
+    static constexpr const char *minusLabels[3] = {"L", "P", "I"};
+    setOrientationLabels(plusLabels, minusLabels);
+    qInfo() << "Verified NIfTI preview orientation labels in RAS world coordinates."
+            << "+X=R -X=L +Y=A -Y=P +Z=S -Z=I";
+}
+
 void Mask3DViewerWidget::clearVolumeBoundsGuide()
 {
     if (m_boundsActor) {
@@ -388,7 +400,7 @@ void Mask3DViewerWidget::updateModelBoundsGuide(const double surfaceBounds[6])
     updateCtPlaneCropping();
     updateCtPlaneVisibility();
 
-    qInfo() << "3D CAC guide cube center=" << centerX << centerY << centerZ
+    qInfo() << "3D model guide cube center=" << centerX << centerY << centerZ
             << "side lengths=" << cubeSideLength << cubeSideLength << cubeSideLength
             << "margin ratio=" << marginRatio;
 
@@ -555,6 +567,7 @@ void Mask3DViewerWidget::forceEndInteraction()
 
 void Mask3DViewerWidget::clear()
 {
+    removeMultiStructurePreview(false);
     if (m_maskActor) {
         m_renderer->RemoveActor(m_maskActor);
         m_maskActor = nullptr;
@@ -573,19 +586,27 @@ void Mask3DViewerWidget::resetCamera()
         qWarning() << "Reset 3D camera skipped: renderer/render window missing.";
         return;
     }
-    if (!m_maskActor || !m_maskActor->GetVisibility()) {
-        qWarning() << "Reset 3D camera skipped: no visible mask actor.";
-        return;
-    }
-
     double bounds[6];
-    m_maskActor->GetBounds(bounds);
+    if (m_multiStructurePreviewActive) {
+        if (!visibleMultiStructureBounds(bounds)) {
+            qWarning() << "Reset 3D camera skipped: no visible multi-structure actors.";
+            return;
+        }
+    } else {
+        if (!m_maskActor || !m_maskActor->GetVisibility()) {
+            qWarning() << "Reset 3D camera skipped: no visible mask actor.";
+            return;
+        }
+        m_maskActor->GetBounds(bounds);
+    }
     if (!boundsAreValid(bounds)) {
         qWarning() << "Reset 3D camera skipped: mask actor bounds are invalid.";
         return;
     }
 
-    const double *frameBounds = m_hasSurfaceFrameBounds ? m_surfaceFrameBounds : bounds;
+    const double *frameBounds = m_multiStructurePreviewActive
+        ? bounds
+        : (m_hasSurfaceFrameBounds ? m_surfaceFrameBounds : bounds);
 
     vtkCamera *camera = renderer->GetActiveCamera();
     if (!camera) {
@@ -765,7 +786,7 @@ void Mask3DViewerWidget::setSagittalPlaneVisible(bool visible)
 void Mask3DViewerWidget::updateCtPlaneVisibility()
 {
     const bool geometryReady = m_hasCtVolume && m_ctMaskGeometryAligned
-        && m_hasSurfaceFrameBounds;
+        && m_hasSurfaceFrameBounds && !m_multiStructurePreviewActive;
     for (int orientation = 0; orientation < 3; ++orientation) {
         const size_t plane = static_cast<size_t>(orientation);
         if (m_ctPlaneActors[plane]) {
@@ -858,6 +879,8 @@ double Mask3DViewerWidget::surfaceOpacity() const
 
 void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
 {
+    const bool returningFromMultiStructurePreview = m_multiStructurePreviewActive;
+    removeMultiStructurePreview(false);
     if (!mask.isValid()) {
         qWarning() << "Mask3DViewerWidget: invalid mask; clearing 3D surface.";
         clear();
@@ -935,7 +958,7 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     m_renderer->AddActor(m_maskActor);
     updateModelBoundsGuide(surfaceBounds);
 
-    const bool firstRenderedMask = !m_hasRenderedMask;
+    const bool firstRenderedMask = !m_hasRenderedMask || returningFromMultiStructurePreview;
     m_hasRenderedMask = true;
     if (firstRenderedMask) {
         resetCamera();
@@ -948,4 +971,219 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
             << mask.width << "x" << mask.height << "x" << mask.depth
             << "spacing=(" << spacingValue(mask, 0) << "," << spacingValue(mask, 1) << "," << spacingValue(mask, 2) << ")"
             << "foreground voxels=" << nonzeroCount;
+}
+
+bool Mask3DViewerWidget::loadMultiStructurePreview(const QString &ctPath,
+                                                    const QString &segmentationPath,
+                                                    QString *errorMessage)
+{
+    MultiStructureVolume loadedVolume;
+    MultiStructureNiftiLoader loader;
+    if (!loader.load(ctPath, segmentationPath, &loadedVolume, errorMessage)) {
+        return false;
+    }
+
+    std::vector<MultiStructureSurface> extractedSurfaces;
+    extractedSurfaces.reserve(loadedVolume.labels.size());
+    for (const MultiStructureLabelInfo &label : loadedVolume.labels) {
+        QElapsedTimer extractionTimer;
+        extractionTimer.start();
+
+        vtkNew<vtkDiscreteFlyingEdges3D> extractor;
+        extractor->SetInputData(loadedVolume.segmentationImage);
+        extractor->SetValue(0, static_cast<double>(label.value));
+        extractor->Update();
+
+        vtkPolyData *output = extractor->GetOutput();
+        if (!output || output->GetNumberOfPoints() == 0 || output->GetNumberOfCells() == 0) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Surface extraction produced no geometry for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+
+        double localBounds[6] = {};
+        output->GetBounds(localBounds);
+        if (!boundsAreValid(localBounds)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Surface extraction produced invalid bounds for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+        double point[3] = {};
+        for (vtkIdType pointId = 0; pointId < output->GetNumberOfPoints(); ++pointId) {
+            output->GetPoint(pointId, point);
+            if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Surface extraction produced non-finite coordinates for %1.")
+                                        .arg(label.displayName);
+                }
+                return false;
+            }
+        }
+
+        MultiStructureSurface surface;
+        surface.label = label;
+        surface.polyData = vtkSmartPointer<vtkPolyData>::New();
+        surface.polyData->ShallowCopy(output);
+        surface.mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        surface.mapper->SetInputData(surface.polyData);
+        surface.mapper->ScalarVisibilityOff();
+        surface.actor = vtkSmartPointer<vtkActor>::New();
+        surface.actor->SetMapper(surface.mapper);
+        surface.actor->SetUserMatrix(loadedVolume.segmentationGeometry.dataToWorldRas);
+        surface.actor->GetProperty()->SetColor(label.color[0], label.color[1], label.color[2]);
+        surface.actor->GetProperty()->SetOpacity(label.defaultOpacity);
+        surface.actor->GetProperty()->SetSpecular(0.15);
+        surface.actor->GetProperty()->SetSpecularPower(16.0);
+        surface.extractionMilliseconds = extractionTimer.elapsed();
+
+        double worldBounds[6] = {};
+        surface.actor->GetBounds(worldBounds);
+        if (!boundsAreValid(worldBounds)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Physical transform produced invalid world bounds for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+
+        qInfo() << "Extracted multi-structure surface"
+                << label.displayName
+                << "value=" << label.value
+                << "points=" << surface.polyData->GetNumberOfPoints()
+                << "cells=" << surface.polyData->GetNumberOfCells()
+                << "time ms=" << surface.extractionMilliseconds
+                << "world RAS bounds mm="
+                << worldBounds[0] << worldBounds[1]
+                << worldBounds[2] << worldBounds[3]
+                << worldBounds[4] << worldBounds[5];
+        extractedSurfaces.push_back(std::move(surface));
+    }
+
+    removeMultiStructurePreview(false);
+    if (m_maskActor) {
+        m_maskActor->SetVisibility(false);
+    }
+    m_multiStructureVolume = std::move(loadedVolume);
+    m_multiStructureSurfaces = std::move(extractedSurfaces);
+    m_multiStructurePreviewActive = true;
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        m_renderer->AddActor(surface.actor);
+    }
+    updateOrientationLabelsForRasWorld();
+    updateMultiStructureBoundsGuide();
+    updateCtPlaneVisibility();
+    resetCamera();
+    return true;
+}
+
+bool Mask3DViewerWidget::isMultiStructurePreviewActive() const
+{
+    return m_multiStructurePreviewActive;
+}
+
+std::vector<Mask3DViewerWidget::MultiStructureSurfaceInfo> Mask3DViewerWidget::multiStructureSurfaces() const
+{
+    std::vector<MultiStructureSurfaceInfo> surfaceInfos;
+    surfaceInfos.reserve(m_multiStructureSurfaces.size());
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        MultiStructureSurfaceInfo info;
+        info.labelValue = surface.label.value;
+        info.displayName = surface.label.displayName;
+        info.voxelCount = surface.label.voxelCount;
+        info.pointCount = surface.polyData ? surface.polyData->GetNumberOfPoints() : 0;
+        info.cellCount = surface.polyData ? surface.polyData->GetNumberOfCells() : 0;
+        info.extractionMilliseconds = surface.extractionMilliseconds;
+        info.color = surface.label.color;
+        info.opacity = surface.actor ? surface.actor->GetProperty()->GetOpacity() : 0.0;
+        info.visible = surface.actor && surface.actor->GetVisibility();
+        surfaceInfos.push_back(info);
+    }
+    return surfaceInfos;
+}
+
+void Mask3DViewerWidget::setMultiStructureVisible(int labelValue, bool visible)
+{
+    for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.label.value == labelValue && surface.actor) {
+            surface.actor->SetVisibility(visible);
+            updateMultiStructureBoundsGuide();
+            m_renderer->ResetCameraClippingRange();
+            m_renderWindow->Render();
+            return;
+        }
+    }
+}
+
+void Mask3DViewerWidget::setMultiStructureOpacity(int labelValue, double opacity)
+{
+    const double clampedOpacity = std::clamp(opacity, 0.0, 1.0);
+    for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.label.value == labelValue && surface.actor) {
+            surface.actor->GetProperty()->SetOpacity(clampedOpacity);
+            m_renderWindow->Render();
+            return;
+        }
+    }
+}
+
+void Mask3DViewerWidget::removeMultiStructurePreview(bool restoreNormalMask)
+{
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.actor) {
+            m_renderer->RemoveActor(surface.actor);
+        }
+    }
+    m_multiStructureSurfaces.clear();
+    m_multiStructureVolume = {};
+    m_multiStructurePreviewActive = false;
+
+    if (restoreNormalMask && m_maskActor) {
+        m_maskActor->SetVisibility(true);
+        double bounds[6] = {};
+        m_maskActor->GetBounds(bounds);
+        if (boundsAreValid(bounds)) {
+            updateModelBoundsGuide(bounds);
+        }
+    }
+    updateCtPlaneVisibility();
+}
+
+bool Mask3DViewerWidget::visibleMultiStructureBounds(double bounds[6]) const
+{
+    bounds[0] = bounds[2] = bounds[4] = std::numeric_limits<double>::infinity();
+    bounds[1] = bounds[3] = bounds[5] = -std::numeric_limits<double>::infinity();
+    bool foundVisibleSurface = false;
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (!surface.actor || !surface.actor->GetVisibility()) {
+            continue;
+        }
+        double actorBounds[6] = {};
+        surface.actor->GetBounds(actorBounds);
+        if (!boundsAreValid(actorBounds)) {
+            continue;
+        }
+        foundVisibleSurface = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds[axis * 2] = std::min(bounds[axis * 2], actorBounds[axis * 2]);
+            bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], actorBounds[axis * 2 + 1]);
+        }
+    }
+    return foundVisibleSurface && boundsAreValid(bounds);
+}
+
+void Mask3DViewerWidget::updateMultiStructureBoundsGuide()
+{
+    if (!m_multiStructurePreviewActive) {
+        return;
+    }
+    double bounds[6] = {};
+    if (visibleMultiStructureBounds(bounds)) {
+        updateModelBoundsGuide(bounds);
+    } else {
+        clearVolumeBoundsGuide();
+    }
 }

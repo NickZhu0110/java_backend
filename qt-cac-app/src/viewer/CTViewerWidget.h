@@ -36,6 +36,9 @@ public:
     void loadVolumeFromLocalPath(const QString &path);
     void loadMaskFromLocalPath(const QString &path);
     void loadJobFilesFromCache(const QString &caseCacheDir);
+    bool loadMultiStructurePreview(const QString &ctPath,
+                                   const QString &segmentationPath,
+                                   QString *errorMessage = nullptr);
     bool hasUnsavedEdits() const;
     bool saveCorrectedMask();
 
@@ -139,6 +142,14 @@ private:
         double userZoomFactor = 1.0;
     };
 
+    struct MultiStructureControl
+    {
+        int labelValue = 0;
+        QCheckBox *visibilityCheckBox = nullptr;
+        QSlider *opacitySlider = nullptr;
+        QLabel *opacityLabel = nullptr;
+    };
+
     void createSyntheticStudy();
     void setupUi();
     void setVolumeAndMask(const VolumeData &volume, const MaskVolume &mask, bool hasMask);
@@ -178,6 +189,10 @@ private:
     void updateZoomLabel(ViewOrientation orientation);
     void updateGlobalZoomLabel();
     void refresh3DMaskSurface();
+    void chooseMultiStructureFiles();
+    void rebuildMultiStructureControls();
+    void clearMultiStructureControls();
+    void setMultiStructurePreviewUiActive(bool active);
     void configure3DCtPlanes();
     void update3DPlaneSlice(ViewOrientation orientation, int sliceIndex);
     void handleViewWheel(ViewOrientation orientation, QWheelEvent *event);
@@ -222,6 +237,7 @@ private:
     QPushButton *m_fitAllButton = nullptr;
     QPushButton *m_refresh3DButton = nullptr;
     QPushButton *m_reset3DCameraButton = nullptr;
+    QPushButton *m_loadMultiStructureButton = nullptr;
     QSpinBox *m_brushRadiusSpinBox = nullptr;
     QCheckBox *m_showAiMaskCheckBox = nullptr;
     QCheckBox *m_showWorkingMaskCheckBox = nullptr;
@@ -234,6 +250,10 @@ private:
     QCheckBox *m_showAxial3DPlaneCheckBox = nullptr;
     QCheckBox *m_showCoronal3DPlaneCheckBox = nullptr;
     QCheckBox *m_showSagittal3DPlaneCheckBox = nullptr;
+    QWidget *m_multiStructureControlsWidget = nullptr;
+    QGridLayout *m_multiStructureControlsLayout = nullptr;
+    QLabel *m_multiStructureStatusLabel = nullptr;
+    std::vector<MultiStructureControl> m_multiStructureControls;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
     QWidget *m_threeDPanel = nullptr;

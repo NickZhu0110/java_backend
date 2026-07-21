@@ -4,6 +4,7 @@
 
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
+#include "viewer/MultiStructureVolume.h"
 
 #include <vtkActor.h>
 #include <vtkGenericOpenGLRenderWindow.h>
@@ -12,6 +13,8 @@
 #include <vtkSmartPointer.h>
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 class QVTKOpenGLNativeWidget;
 class StrictTrackballCameraStyle;
@@ -20,12 +23,27 @@ class vtkImageData;
 class vtkImageSlice;
 class vtkImageSliceMapper;
 class vtkOrientationMarkerWidget;
+class vtkPolyData;
+class vtkPolyDataMapper;
 
 class Mask3DViewerWidget : public QWidget
 {
     Q_OBJECT
 
 public:
+    struct MultiStructureSurfaceInfo
+    {
+        int labelValue = 0;
+        QString displayName;
+        std::uint64_t voxelCount = 0;
+        vtkIdType pointCount = 0;
+        vtkIdType cellCount = 0;
+        qint64 extractionMilliseconds = 0;
+        std::array<double, 3> color = {1.0, 1.0, 1.0};
+        double opacity = 0.0;
+        bool visible = false;
+    };
+
     explicit Mask3DViewerWidget(QWidget *parent = nullptr);
 
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -43,15 +61,32 @@ public:
     void setSurfaceOpacity(double opacity);
     double surfaceOpacity() const;
     void refreshFromMask(const MaskVolume &mask);
+    bool loadMultiStructurePreview(const QString &ctPath,
+                                   const QString &segmentationPath,
+                                   QString *errorMessage = nullptr);
+    bool isMultiStructurePreviewActive() const;
+    std::vector<MultiStructureSurfaceInfo> multiStructureSurfaces() const;
+    void setMultiStructureVisible(int labelValue, bool visible);
+    void setMultiStructureOpacity(int labelValue, double opacity);
 
 signals:
     void viewportDoubleClicked();
 
 private:
+    struct MultiStructureSurface
+    {
+        MultiStructureLabelInfo label;
+        vtkSmartPointer<vtkPolyData> polyData;
+        vtkSmartPointer<vtkPolyDataMapper> mapper;
+        vtkSmartPointer<vtkActor> actor;
+        qint64 extractionMilliseconds = 0;
+    };
+
     bool anyMouseButtonDown() const;
     void forceEndInteraction();
     void setupOrientationMarker();
     void updateOrientationLabels(const MaskVolume &mask);
+    void updateOrientationLabelsForRasWorld();
     void setOrientationLabels(const char *const plusLabels[3], const char *const minusLabels[3]);
     void updateModelBoundsGuide(const double surfaceBounds[6]);
     void clearVolumeBoundsGuide();
@@ -61,6 +96,9 @@ private:
     void updateCtPlaneCropping();
     void updateCtPlaneVisibility();
     bool ctGeometryMatchesMask(const MaskVolume &mask) const;
+    void removeMultiStructurePreview(bool restoreNormalMask);
+    bool visibleMultiStructureBounds(double bounds[6]) const;
+    void updateMultiStructureBoundsGuide();
 
     QVTKOpenGLNativeWidget *m_vtkWidget = nullptr;
     vtkNew<vtkGenericOpenGLRenderWindow> m_renderWindow;
@@ -70,6 +108,8 @@ private:
     vtkSmartPointer<vtkAnnotatedCubeActor> m_orientationCube;
     vtkSmartPointer<vtkOrientationMarkerWidget> m_orientationMarker;
     vtkSmartPointer<vtkActor> m_boundsActor;
+    MultiStructureVolume m_multiStructureVolume;
+    std::vector<MultiStructureSurface> m_multiStructureSurfaces;
     vtkSmartPointer<vtkImageData> m_ctImageData;
     std::array<vtkSmartPointer<vtkImageSliceMapper>, 3> m_ctPlaneMappers;
     std::array<vtkSmartPointer<vtkImageSlice>, 3> m_ctPlaneActors;
@@ -86,6 +126,7 @@ private:
     bool m_hasRenderedMask = false;
     bool m_hasCtVolume = false;
     bool m_ctMaskGeometryAligned = false;
+    bool m_multiStructurePreviewActive = false;
     double m_surfaceOpacity = 0.9;
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;

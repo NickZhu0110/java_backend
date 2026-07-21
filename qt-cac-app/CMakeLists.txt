@@ -16,6 +16,7 @@ find_package(VTK REQUIRED COMPONENTS
     FiltersGeneral
     FiltersSources
     GUISupportQt
+    IOImage
     InteractionStyle
     InteractionWidgets
     RenderingAnnotation
@@ -51,6 +52,9 @@ qt_add_executable(qt-cac-app
     src/viewer/LoadedCaseVolume.h
     src/viewer/Mask3DViewerWidget.cpp
     src/viewer/Mask3DViewerWidget.h
+    src/viewer/MultiStructureNiftiLoader.cpp
+    src/viewer/MultiStructureNiftiLoader.h
+    src/viewer/MultiStructureVolume.h
     src/viewer/PythonSimpleItkPreprocessor.cpp
     src/viewer/PythonSimpleItkPreprocessor.h
     src/viewer/RawVolumeLoader.cpp

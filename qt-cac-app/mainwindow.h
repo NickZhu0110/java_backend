@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QString>
 
 class BackendClient;
 class BackendFileClient;
@@ -10,6 +11,7 @@ class JobWebSocketClient;
 class QCloseEvent;
 class QJsonObject;
 class QLineEdit;
+class QTimer;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -39,6 +41,10 @@ private:
     void setBackendConnected(bool connected, const QString &statusText);
     void setJobInProgress(bool inProgress);
     void setNiftiReviewModeActive(bool active);
+    void handleJobStatusUpdate(qint64 jobId,
+                               const QString &status,
+                               int progress,
+                               const QString &errorMessage = QString());
     void updateSubmitButton();
     QString selectedDeviceValue() const;
     void browseDirectory(QLineEdit *lineEdit);
@@ -57,6 +63,7 @@ private:
     BackendClient *m_backendClient;
     BackendFileClient *m_backendFileClient;
     JobWebSocketClient *m_webSocketClient;
+    QTimer *m_jobPollTimer;
     CTViewerWidget *m_ctViewerWidget;
     qint64 m_currentJobId;
     QString m_currentJobInputPath;
@@ -69,6 +76,9 @@ private:
     bool m_jobInProgress;
     bool m_niftiReviewActive;
     bool m_caseCacheLoadDeferredDuringNiftiReview;
+    bool m_resultFetchRequested;
+    QString m_lastJobStatus;
+    int m_lastJobProgress;
     qint64 m_scoreRecalculationDeferredJobId;
 };
 #endif // MAINWINDOW_H

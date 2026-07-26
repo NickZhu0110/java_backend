@@ -29,6 +29,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_backendClient(new BackendClient(this))
     , m_backendFileClient(new BackendFileClient(this))
     , m_webSocketClient(new JobWebSocketClient(this))
+    , m_jobPollTimer(new QTimer(this))
     , m_ctViewerWidget(nullptr)
     , m_currentJobId(-1)
     , m_pendingCorrectedMaskVersion(-1)
@@ -36,13 +37,15 @@ MainWindow::MainWindow(QWidget *parent)
     , m_jobInProgress(false)
     , m_niftiReviewActive(false)
     , m_caseCacheLoadDeferredDuringNiftiReview(false)
+    , m_resultFetchRequested(false)
+    , m_lastJobProgress(-1)
     , m_scoreRecalculationDeferredJobId(-1)
 {
     ui->setupUi(this);
     setupCtViewer();
     setupInitialState();
     connectSignals();
-    loadMostRecentCaseCacheIfAvailable();
+    QTimer::singleShot(0, m_backendClient, &BackendClient::checkHealth);
 }
 
 MainWindow::~MainWindow()
@@ -141,6 +144,7 @@ void MainWindow::setupInitialState()
     ui->progressBar->setRange(0, 100);
     setAdvancedOverridesEnabled(false);
     setBackendConnected(false, QStringLiteral("Backend: Not connected"));
+    m_jobPollTimer->setInterval(1000);
     resetForm();
 }
 
@@ -172,10 +176,24 @@ void MainWindow::connectSignals()
         ui->statusLabel->setText(QStringLiteral("Status: SUBMITTED"));
         ui->progressBar->setValue(0);
         appendLog(QStringLiteral("Job created: %1").arg(jobId));
+        m_resultFetchRequested = false;
+        m_lastJobStatus.clear();
+        m_lastJobProgress = -1;
         m_webSocketClient->connectToServer(jobId);
+        m_jobPollTimer->start();
+    });
+    connect(m_backendClient, &BackendClient::jobFetched,
+            this, [this](const QJsonObject &job) {
+        handleJobStatusUpdate(
+            job.value(QStringLiteral("id")).toVariant().toLongLong(),
+            job.value(QStringLiteral("status")).toString(),
+            job.value(QStringLiteral("progress")).toInt(),
+            job.value(QStringLiteral("errorMessage")).toString());
     });
     connect(m_backendClient, &BackendClient::jobResultFetched,
             this, [this](const QJsonObject &result) {
+        m_jobPollTimer->stop();
+        m_webSocketClient->disconnectFromServer();
         setJobInProgress(false);
         displayResult(result);
     });
@@ -188,29 +206,31 @@ void MainWindow::connectSignals()
 
     connect(m_webSocketClient, &JobWebSocketClient::jobStatusReceived,
             this, [this](qint64 jobId, const QString &status, int progress) {
-        ui->jobIdLabel->setText(QStringLiteral("Job ID: %1").arg(jobId));
-        ui->statusLabel->setText(QStringLiteral("Status: %1").arg(status));
-        ui->progressBar->setValue(progress);
-        appendLog(QStringLiteral("Job %1: %2 (%3%)").arg(jobId).arg(status).arg(progress));
-
-        if (status.compare(QStringLiteral("SUCCESS"), Qt::CaseInsensitive) == 0) {
-            setJobInProgress(false);
-            ui->progressBar->setValue(100);
-            appendLog(QStringLiteral("Fetching result..."));
-            m_backendClient->getJobResult(jobId);
-            m_webSocketClient->disconnectFromServer();
-        } else if (status.compare(QStringLiteral("FAILED"), Qt::CaseInsensitive) == 0) {
-            setJobInProgress(false);
-            m_webSocketClient->disconnectFromServer();
-        }
+        handleJobStatusUpdate(jobId, status, progress);
     });
     connect(m_webSocketClient, &JobWebSocketClient::connectionStatusChanged,
             this, [this](const QString &message) {
         appendLog(message);
     });
     connect(m_webSocketClient, &JobWebSocketClient::errorOccurred, this, [this](const QString &message) {
-        setJobInProgress(false);
+        appendLog(message + QStringLiteral("; HTTP polling remains active."));
+    });
+    connect(m_jobPollTimer, &QTimer::timeout, this, [this]() {
+        if (m_currentJobId > 0 && m_jobInProgress) {
+            m_backendClient->getJob(m_currentJobId);
+        }
+    });
+    connect(m_backendClient, &BackendClient::healthChecked,
+            this, [this](bool available, const QString &message) {
+        setBackendConnected(
+            available,
+            available
+                ? QStringLiteral("Backend: Connected (local)")
+                : QStringLiteral("Backend: Not connected"));
         appendLog(message);
+        if (!available) {
+            QTimer::singleShot(2000, m_backendClient, &BackendClient::checkHealth);
+        }
     });
 
     connect(m_backendFileClient, &BackendFileClient::aiMaskDownloaded,
@@ -248,7 +268,7 @@ void MainWindow::connectSignals()
                       .arg(jobId)
                       .arg(httpStatus)
                       .arg(message));
-        appendLog(QStringLiteral("Synthetic viewer fallback remains active."));
+        appendLog(QStringLiteral("The viewer remains empty because the real AI mask is unavailable."));
     });
 
     connect(m_backendFileClient, &BackendFileClient::inputVolumeDownloaded,
@@ -285,7 +305,7 @@ void MainWindow::connectSignals()
                       .arg(jobId)
                       .arg(httpStatus)
                       .arg(message));
-        appendLog(QStringLiteral("Real CT display remains blocked; synthetic viewer fallback remains active."));
+        appendLog(QStringLiteral("Real CT display remains unavailable; no synthetic data was substituted."));
     });
 
     if (m_ctViewerWidget) {
@@ -331,6 +351,11 @@ void MainWindow::connectSignals()
         appendLog(QStringLiteral("Corrected mask uploaded for job %1: %2")
                       .arg(jobId)
                       .arg(response.value(QStringLiteral("correctedMaskPath")).toString()));
+        const QString exportedRawPath =
+            response.value(QStringLiteral("exportedCorrectedRawPath")).toString();
+        if (!exportedRawPath.isEmpty()) {
+            appendLog(QStringLiteral("User export copy: %1").arg(exportedRawPath));
+        }
         appendLog(QStringLiteral("Backend upload diagnostics: returned version=v%1 expected version=v%2 bytes=%3 metadataBytes=%4 versionMatch=%5")
                       .arg(backendVersion)
                       .arg(m_pendingCorrectedMaskVersion)
@@ -370,6 +395,11 @@ void MainWindow::connectSignals()
                       .arg(response.value(QStringLiteral("correctedMaskPath")).toString(QStringLiteral("-"))));
         appendLog(QStringLiteral("Corrected Result: %1")
                       .arg(response.value(QStringLiteral("correctedResultJsonPath")).toString(QStringLiteral("-"))));
+        const QString exportedMaskPath =
+            response.value(QStringLiteral("exportedCorrectedMaskPath")).toString();
+        if (!exportedMaskPath.isEmpty()) {
+            appendLog(QStringLiteral("Exported corrected NRRD: %1").arg(exportedMaskPath));
+        }
         appendLog(QStringLiteral("Mask voxels: %1")
                       .arg(response.value(QStringLiteral("maskNonzeroVoxelCount")).toVariant().toString()));
         appendLog(QStringLiteral("Eligible voxels HU>=130: %1")
@@ -415,7 +445,6 @@ bool MainWindow::validateInputs() const
     if (ui->outputPathLineEdit->text().trimmed().isEmpty()) {
         missingFields << QStringLiteral("output path");
     }
-
     if (!missingFields.isEmpty()) {
         QMessageBox::warning(const_cast<MainWindow *>(this),
                              QStringLiteral("Missing Required Fields"),
@@ -493,6 +522,9 @@ void MainWindow::resetForm()
     m_currentCaseKey.clear();
     m_currentServerResultJsonPath.clear();
     m_currentServerAiMaskPath.clear();
+    m_resultFetchRequested = false;
+    m_lastJobStatus.clear();
+    m_lastJobProgress = -1;
     ui->segmentcacsSrcLineEdit->clear();
     ui->modelLineEdit->clear();
     ui->inputPathLineEdit->clear();
@@ -515,6 +547,7 @@ void MainWindow::resetForm()
     ui->resultTextEdit->clear();
     updateSubmitButton();
 
+    m_jobPollTimer->stop();
     m_webSocketClient->disconnectFromServer();
 }
 
@@ -587,6 +620,53 @@ void MainWindow::setNiftiReviewModeActive(bool active)
     });
 }
 
+void MainWindow::handleJobStatusUpdate(qint64 jobId,
+                                       const QString &status,
+                                       int progress,
+                                       const QString &errorMessage)
+{
+    if (jobId <= 0 || jobId != m_currentJobId) {
+        return;
+    }
+
+    const QString normalizedStatus = status.trimmed().toUpper();
+    const int boundedProgress = qBound(0, progress, 100);
+    ui->statusLabel->setText(QStringLiteral("Status: %1").arg(normalizedStatus));
+    ui->progressBar->setValue(boundedProgress);
+
+    if (normalizedStatus != m_lastJobStatus || boundedProgress != m_lastJobProgress) {
+        appendLog(QStringLiteral("Job %1: %2 (%3%)")
+                      .arg(jobId)
+                      .arg(normalizedStatus)
+                      .arg(boundedProgress));
+        m_lastJobStatus = normalizedStatus;
+        m_lastJobProgress = boundedProgress;
+    }
+
+    if (normalizedStatus == QStringLiteral("COMPLETED")
+        || normalizedStatus == QStringLiteral("SUCCESS")) {
+        m_jobPollTimer->stop();
+        m_webSocketClient->disconnectFromServer();
+        if (!m_resultFetchRequested) {
+            m_resultFetchRequested = true;
+            appendLog(QStringLiteral("Analysis completed; fetching result artifacts..."));
+            m_backendClient->getJobResult(jobId);
+        }
+        return;
+    }
+
+    if (normalizedStatus == QStringLiteral("FAILED")
+        || normalizedStatus == QStringLiteral("CANCELLED")) {
+        m_jobPollTimer->stop();
+        m_webSocketClient->disconnectFromServer();
+        setJobInProgress(false);
+        const QString details = errorMessage.trimmed().isEmpty()
+            ? QStringLiteral("See the backend job log for details.")
+            : errorMessage.trimmed();
+        appendLog(QStringLiteral("Job %1 %2: %3").arg(jobId).arg(normalizedStatus, details));
+    }
+}
+
 void MainWindow::updateSubmitButton()
 {
     ui->submitButton->setEnabled(
@@ -644,8 +724,20 @@ void MainWindow::updateResultLabels(const QJsonObject &result)
         ? QStringLiteral("correctedRiskGrade")
         : QStringLiteral("riskGrade");
     const QString resultJsonKey = hasCorrectedScore
-        ? QStringLiteral("correctedResultJsonPath")
-        : QStringLiteral("resultJsonPath");
+        ? (result.value(QStringLiteral("exportedCorrectedResultJsonPath")).toString().isEmpty()
+               ? QStringLiteral("correctedResultJsonPath")
+               : QStringLiteral("exportedCorrectedResultJsonPath"))
+        : (result.value(QStringLiteral("exportedResultJsonPath")).toString().isEmpty()
+               ? QStringLiteral("resultJsonPath")
+               : QStringLiteral("exportedResultJsonPath"));
+    const QString aiMaskKey =
+        result.value(QStringLiteral("exportedAiMaskPath")).toString().isEmpty()
+        ? QStringLiteral("aiMaskPath")
+        : QStringLiteral("exportedAiMaskPath");
+    const QString correctedMaskKey =
+        result.value(QStringLiteral("exportedCorrectedMaskPath")).toString().isEmpty()
+        ? QStringLiteral("correctedMaskPath")
+        : QStringLiteral("exportedCorrectedMaskPath");
 
     ui->agatstonScoreLabel->setText(QStringLiteral("Agatston Score: %1")
                                         .arg(result.value(scoreKey).toVariant().toString()));
@@ -654,9 +746,9 @@ void MainWindow::updateResultLabels(const QJsonObject &result)
     ui->resultJsonPathLabel->setText(QStringLiteral("Result JSON Path: %1")
                                          .arg(result.value(resultJsonKey).toString(QStringLiteral("-"))));
     ui->aiMaskPathLabel->setText(QStringLiteral("AI Mask Path: %1")
-                                     .arg(result.value(QStringLiteral("aiMaskPath")).toString(QStringLiteral("-"))));
+                                     .arg(result.value(aiMaskKey).toString(QStringLiteral("-"))));
     ui->correctedMaskPathLabel->setText(QStringLiteral("Corrected Mask Path: %1")
-                                            .arg(result.value(QStringLiteral("correctedMaskPath")).toString(QStringLiteral("-"))));
+                                            .arg(result.value(correctedMaskKey).toString(QStringLiteral("-"))));
     ui->reportPathLabel->setText(QStringLiteral("Report Path: %1")
                                      .arg(result.value(QStringLiteral("reportPath")).toString(QStringLiteral("-"))));
 }
@@ -728,7 +820,7 @@ void MainWindow::prepareCaseCacheForInput(const QString &inputPath)
     metadata.insert(QStringLiteral("localCaseCacheDir"), caseCacheDir);
     metadata.insert(QStringLiteral("localInputVolumeDir"), inputVolumeDir);
     metadata.insert(QStringLiteral("inputReferenceMode"), true);
-    metadata.insert(QStringLiteral("inputExistsOnThisMac"), inputInfo.exists());
+    metadata.insert(QStringLiteral("inputExistsOnThisMachine"), inputInfo.exists());
     metadata.insert(QStringLiteral("inputIsDir"), inputInfo.isDir());
     metadata.insert(QStringLiteral("updatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     metadata.insert(QStringLiteral("note"),
@@ -768,7 +860,7 @@ void MainWindow::handleJobResultFiles(const QJsonObject &result)
     const QString localAiMaskPath = QFile::exists(cacheManager.localAiMaskPath(m_currentCaseKey))
         ? cacheManager.localAiMaskJobPath(m_currentCaseKey, m_currentJobId)
         : cacheManager.localAiMaskPath(m_currentCaseKey);
-    const QString localInputVolumePath = cacheManager.localInputVolumeZipPath(m_currentCaseKey, m_currentJobId);
+    const QString localInputVolumePath = cacheManager.localInputVolumeNrrdPath(m_currentCaseKey, m_currentJobId);
     const QString downloadUrl = m_backendFileClient->aiMaskDownloadUrl(m_currentJobId);
     const QString inputDownloadUrl = m_backendFileClient->inputVolumeDownloadUrl(m_currentJobId);
 
@@ -801,8 +893,8 @@ void MainWindow::handleJobResultFiles(const QJsonObject &result)
     jobMetadata.insert(QStringLiteral("downloadedAt"), QString());
     cacheManager.writeJobMetadata(m_currentJobId, jobMetadata);
 
-    // Server-local paths such as /root/autodl-tmp/... are metadata only. The Qt
-    // client must download artifacts through backend endpoints into case cache.
+    // Server-internal paths are metadata only. The Qt client must download
+    // artifacts through backend endpoints into the local case cache.
     m_backendFileClient->downloadAiMask(m_currentJobId, localAiMaskPath);
     m_backendFileClient->downloadInputVolume(m_currentJobId, localInputVolumePath);
 }

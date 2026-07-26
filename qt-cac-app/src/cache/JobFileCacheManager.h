@@ -19,6 +19,7 @@ public:
     QString localJobAiMaskPath(const QString &caseKey, qint64 jobId) const;
     QString localInputVolumeDir(const QString &caseKey) const;
     QString localInputVolumeZipPath(const QString &caseKey, qint64 jobId) const;
+    QString localInputVolumeNrrdPath(const QString &caseKey, qint64 jobId) const;
     QString localResultJsonPath(const QString &caseKey) const;
     QString localCorrectedMaskPath(const QString &caseKey, int version) const;
     QString localEditOpsPath(const QString &caseKey, int version) const;

@@ -176,6 +176,16 @@ LoadedCaseVolume CaseVolumeLoader::loadCaseFromCache(const QString &caseCacheDir
 QString CaseVolumeLoader::findInputVolumeArtifact(const QString &caseCacheDir) const
 {
     const QDir inputDir(QDir(caseCacheDir).filePath(QStringLiteral("input_volume")));
+    const QFileInfoList medicalFiles = inputDir.entryInfoList({QStringLiteral("*.nrrd"),
+                                                               QStringLiteral("*.nii"),
+                                                               QStringLiteral("*.nii.gz"),
+                                                               QStringLiteral("*.mhd")},
+                                                              QDir::Files,
+                                                              QDir::Time);
+    if (!medicalFiles.isEmpty()) {
+        return medicalFiles.first().absoluteFilePath();
+    }
+
     const QFileInfoList zipFiles = inputDir.entryInfoList({QStringLiteral("input_volume_job_*.zip")},
                                                           QDir::Files,
                                                           QDir::Time);
@@ -188,32 +198,22 @@ QString CaseVolumeLoader::findInputVolumeArtifact(const QString &caseCacheDir) c
         return dicomSeries.absoluteFilePath();
     }
 
-    const QFileInfoList medicalFiles = inputDir.entryInfoList({QStringLiteral("*.nrrd"),
-                                                               QStringLiteral("*.nii"),
-                                                               QStringLiteral("*.nii.gz"),
-                                                               QStringLiteral("*.mhd")},
-                                                              QDir::Files,
-                                                              QDir::Time);
-    if (!medicalFiles.isEmpty()) {
-        return medicalFiles.first().absoluteFilePath();
-    }
-
     return {};
 }
 
 QString CaseVolumeLoader::findMaskArtifact(const QString &caseCacheDir) const
 {
-    const QFileInfo canonicalMask(QDir(caseCacheDir).filePath(QStringLiteral("ai_mask_v0.nrrd")));
-    if (canonicalMask.exists() && canonicalMask.isFile()) {
-        return canonicalMask.absoluteFilePath();
-    }
-
     const QDir maskDir(QDir(caseCacheDir).filePath(QStringLiteral("ai_masks")));
     const QFileInfoList maskFiles = maskDir.entryInfoList({QStringLiteral("*.nrrd")},
                                                           QDir::Files,
                                                           QDir::Time);
     if (!maskFiles.isEmpty()) {
         return maskFiles.first().absoluteFilePath();
+    }
+
+    const QFileInfo canonicalMask(QDir(caseCacheDir).filePath(QStringLiteral("ai_mask_v0.nrrd")));
+    if (canonicalMask.exists() && canonicalMask.isFile()) {
+        return canonicalMask.absoluteFilePath();
     }
     return {};
 }

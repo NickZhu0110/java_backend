@@ -24,6 +24,8 @@ spring:
 server:
   address: 127.0.0.1
   port: ${CAC_BACKEND_PORT:6006}
+  error:
+    include-message: always
 
 management:
   endpoints:

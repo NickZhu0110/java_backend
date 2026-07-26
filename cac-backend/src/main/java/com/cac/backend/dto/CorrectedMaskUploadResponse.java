@@ -16,4 +16,10 @@ public class CorrectedMaskUploadResponse {
     private Long correctedMaskBytes;
 
     private Long metadataBytes;
+
+    private String exportDirectory;
+
+    private String exportedCorrectedRawPath;
+
+    private String exportedCorrectedMetadataPath;
 }

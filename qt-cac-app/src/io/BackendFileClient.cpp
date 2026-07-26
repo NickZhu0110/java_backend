@@ -9,6 +9,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSharedPointer>
 #include <QSettings>
 #include <QUrl>
 
@@ -22,8 +23,15 @@ BackendFileClient::BackendFileClient(QObject *parent)
 void BackendFileClient::loadSettings()
 {
     QSettings settings;
-    setBaseUrl(settings.value(QStringLiteral("server/backendUrl"),
-                              QStringLiteral("http://localhost:8080")).toString());
+    QString configuredUrl = qEnvironmentVariable("CAC_BACKEND_URL").trimmed();
+    if (configuredUrl.isEmpty()) {
+        configuredUrl = settings.value(QStringLiteral("server/backendUrl"),
+                                       QStringLiteral("http://127.0.0.1:6006")).toString();
+    }
+    if (configuredUrl == QStringLiteral("http://localhost:8080")) {
+        configuredUrl = QStringLiteral("http://127.0.0.1:6006");
+    }
+    setBaseUrl(configuredUrl);
 }
 
 void BackendFileClient::setBaseUrl(const QString &baseUrl)
@@ -33,7 +41,7 @@ void BackendFileClient::setBaseUrl(const QString &baseUrl)
         m_baseUrl.chop(1);
     }
     if (m_baseUrl.isEmpty()) {
-        m_baseUrl = QStringLiteral("http://localhost:8080");
+        m_baseUrl = QStringLiteral("http://127.0.0.1:6006");
     }
 }
 
@@ -59,62 +67,78 @@ QString BackendFileClient::recalculateScoreUrl(qint64 jobId) const
 
 void BackendFileClient::downloadAiMask(qint64 jobId, const QString &destinationPath)
 {
-    QNetworkRequest request(QUrl(aiMaskDownloadUrl(jobId)));
-    QNetworkReply *reply = m_networkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, jobId, destinationPath]() {
-        const QByteArray body = reply->readAll();
-        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit aiMaskDownloadFailed(jobId,
-                                      QStringLiteral("AI mask download failed: %1").arg(reply->errorString()),
-                                      httpStatus);
-            reply->deleteLater();
-            return;
-        }
-
-        QDir().mkpath(QFileInfo(destinationPath).absolutePath());
-        QFile file(destinationPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            emit aiMaskDownloadFailed(jobId,
-                                      QStringLiteral("AI mask download failed: cannot write %1").arg(destinationPath),
-                                      httpStatus);
-            reply->deleteLater();
-            return;
-        }
-
-        const qint64 bytesWritten = file.write(body);
-        emit aiMaskDownloaded(jobId, destinationPath, bytesWritten);
-        reply->deleteLater();
-    });
+    downloadToFile(aiMaskDownloadUrl(jobId), jobId, destinationPath, true);
 }
 
 void BackendFileClient::downloadInputVolume(qint64 jobId, const QString &destinationPath)
 {
-    QNetworkRequest request(QUrl(inputVolumeDownloadUrl(jobId)));
+    downloadToFile(inputVolumeDownloadUrl(jobId), jobId, destinationPath, false);
+}
+
+void BackendFileClient::downloadToFile(const QString &url,
+                                       qint64 jobId,
+                                       const QString &destinationPath,
+                                       bool aiMask)
+{
+    QDir().mkpath(QFileInfo(destinationPath).absolutePath());
+    auto file = QSharedPointer<QFile>::create(destinationPath);
+    if (!file->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        const QString message =
+            QStringLiteral("Cannot write download destination: %1").arg(destinationPath);
+        if (aiMask) {
+            emit aiMaskDownloadFailed(jobId, message, 0);
+        } else {
+            emit inputVolumeDownloadFailed(jobId, message, 0);
+        }
+        return;
+    }
+
+    QNetworkRequest request{QUrl(url)};
     QNetworkReply *reply = m_networkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, jobId, destinationPath]() {
-        const QByteArray body = reply->readAll();
+    auto bytesWritten = QSharedPointer<qint64>::create(0);
+    auto writeFailed = QSharedPointer<bool>::create(false);
+    const auto drainReply = [reply, file, bytesWritten, writeFailed]() {
+        const QByteArray chunk = reply->readAll();
+        if (chunk.isEmpty() || *writeFailed) {
+            return;
+        }
+        const qint64 written = file->write(chunk);
+        if (written != chunk.size()) {
+            *writeFailed = true;
+            return;
+        }
+        *bytesWritten += written;
+    };
+
+    connect(reply, &QNetworkReply::readyRead, this, drainReply);
+    connect(reply, &QNetworkReply::finished, this,
+            [this,
+             reply,
+             file,
+             bytesWritten,
+             writeFailed,
+             drainReply,
+             jobId,
+             destinationPath,
+             aiMask]() {
+        drainReply();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (reply->error() != QNetworkReply::NoError) {
-            emit inputVolumeDownloadFailed(jobId,
-                                           QStringLiteral("Input volume download failed: %1").arg(reply->errorString()),
-                                           httpStatus);
-            reply->deleteLater();
-            return;
+        file->close();
+        if (reply->error() != QNetworkReply::NoError || *writeFailed) {
+            QFile::remove(destinationPath);
+            const QString message = *writeFailed
+                ? QStringLiteral("Download failed while writing the destination file.")
+                : QStringLiteral("Download failed: %1").arg(reply->errorString());
+            if (aiMask) {
+                emit aiMaskDownloadFailed(jobId, message, httpStatus);
+            } else {
+                emit inputVolumeDownloadFailed(jobId, message, httpStatus);
+            }
+        } else if (aiMask) {
+            emit aiMaskDownloaded(jobId, destinationPath, *bytesWritten);
+        } else {
+            emit inputVolumeDownloaded(jobId, destinationPath, *bytesWritten);
         }
-
-        QDir().mkpath(QFileInfo(destinationPath).absolutePath());
-        QFile file(destinationPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            emit inputVolumeDownloadFailed(jobId,
-                                           QStringLiteral("Input volume download failed: cannot write %1").arg(destinationPath),
-                                           httpStatus);
-            reply->deleteLater();
-            return;
-        }
-
-        const qint64 bytesWritten = file.write(body);
-        emit inputVolumeDownloaded(jobId, destinationPath, bytesWritten);
         reply->deleteLater();
     });
 }

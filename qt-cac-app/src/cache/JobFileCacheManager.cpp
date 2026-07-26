@@ -9,6 +9,11 @@
 
 QString JobFileCacheManager::baseCacheDir() const
 {
+    const QString configuredDataRoot = qEnvironmentVariable("CAC_DATA_ROOT").trimmed();
+    if (!configuredDataRoot.isEmpty()) {
+        return QDir(configuredDataRoot).filePath(QStringLiteral("qt-cache"));
+    }
+
     QDir dir(QCoreApplication::applicationDirPath());
     while (!dir.exists(QStringLiteral("CMakeLists.txt")) && dir.cdUp()) {
     }
@@ -105,6 +110,12 @@ QString JobFileCacheManager::localInputVolumeDir(const QString &caseKey) const
 QString JobFileCacheManager::localInputVolumeZipPath(const QString &caseKey, qint64 jobId) const
 {
     return QDir(localInputVolumeDir(caseKey)).filePath(QStringLiteral("input_volume_job_%1.zip").arg(jobId));
+}
+
+QString JobFileCacheManager::localInputVolumeNrrdPath(const QString &caseKey, qint64 jobId) const
+{
+    return QDir(localInputVolumeDir(caseKey)).filePath(
+        QStringLiteral("input_volume_job_%1.nrrd").arg(jobId));
 }
 
 QString JobFileCacheManager::localResultJsonPath(const QString &caseKey) const

@@ -6,8 +6,10 @@ import com.cac.backend.dto.CorrectedMaskUploadResponse;
 import com.cac.backend.dto.CreateOrUpdateCacResultRequest;
 import com.cac.backend.entity.AnalysisJob;
 import com.cac.backend.entity.CacResult;
+import com.cac.backend.entity.CorrectedMaskVersion;
 import com.cac.backend.mapper.AnalysisJobMapper;
 import com.cac.backend.mapper.CacResultMapper;
+import com.cac.backend.mapper.CorrectedMaskVersionMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,6 +19,7 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -26,7 +29,13 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -39,24 +48,30 @@ public class CacResultService {
 
     private final AnalysisJobMapper analysisJobMapper;
     private final CacResultMapper cacResultMapper;
+    private final CorrectedMaskVersionMapper correctedMaskVersionMapper;
     private final ObjectMapper objectMapper;
 
     @Value("${cac.storage.root:storage}")
     private String storageRoot;
 
-    @Value("${cac.recalculate.python-executable:python3}")
+    @Value("${cac.recalculate.python-executable:}")
     private String recalculatePythonExecutable;
 
     @Value("${cac.recalculate.script-path:../python-worker/recalculate_agatston.py}")
     private String recalculateScriptPath;
 
+    @Value("${cac.recalculate.segmentcacs-src:}")
+    private String recalculateSegmentCacsSrc;
+
     public CacResultService(
             AnalysisJobMapper analysisJobMapper,
             CacResultMapper cacResultMapper,
+            CorrectedMaskVersionMapper correctedMaskVersionMapper,
             ObjectMapper objectMapper
     ) {
         this.analysisJobMapper = analysisJobMapper;
         this.cacResultMapper = cacResultMapper;
+        this.correctedMaskVersionMapper = correctedMaskVersionMapper;
         this.objectMapper = objectMapper;
     }
 
@@ -199,6 +214,7 @@ public class CacResultService {
         return path;
     }
 
+    @Transactional
     public CorrectedMaskUploadResponse saveCorrectedMaskUpload(
             Long jobId,
             MultipartFile maskFile,
@@ -220,6 +236,45 @@ public class CacResultService {
             if (version <= 0) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Corrected mask metadata version is missing.");
             }
+            int width = metadata.path("width").asInt(0);
+            int height = metadata.path("height").asInt(0);
+            int depth = metadata.path("depth").asInt(0);
+            if (width <= 0 || height <= 0 || depth <= 0) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Corrected mask metadata dimensions are invalid."
+                );
+            }
+            long expectedMaskBytes;
+            try {
+                expectedMaskBytes = Math.multiplyExact(
+                        Math.multiplyExact((long) width, (long) height),
+                        (long) depth
+                );
+            } catch (ArithmeticException e) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Corrected mask dimensions are too large.",
+                        e
+                );
+            }
+            if (maskFile.getSize() != expectedMaskBytes) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Corrected mask byte size does not match metadata dimensions."
+                );
+            }
+            boolean versionExists = correctedMaskVersionMapper.exists(
+                    new LambdaQueryWrapper<CorrectedMaskVersion>()
+                            .eq(CorrectedMaskVersion::getJobId, jobId)
+                            .eq(CorrectedMaskVersion::getVersion, version)
+            );
+            if (versionExists) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Corrected mask version already exists for job " + jobId + ": v" + version
+                );
+            }
             String maskNonzeroVoxelCount = metadata.path("maskNonzeroVoxelCount").asText("-");
             String eligibleVoxelCountHU130 = metadata.path("eligibleVoxelCountHU130").asText("-");
             String workingMaskChecksum = metadata.path("workingMaskChecksum").asText("-");
@@ -234,9 +289,47 @@ public class CacResultService {
 
             Path correctedMaskPath = outputDir.resolve(String.format("corrected_mask_v%d.raw", version));
             Path correctedMetadataPath = outputDir.resolve(String.format("corrected_mask_v%d_metadata.json", version));
+            if (Files.exists(correctedMaskPath) || Files.exists(correctedMetadataPath)) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Corrected mask files already exist for job " + jobId + ": v" + version
+                );
+            }
 
             maskFile.transferTo(correctedMaskPath);
             metadataFile.transferTo(correctedMetadataPath);
+            String checksumSha256 = sha256(correctedMaskPath);
+            Path userExportDirectory = userExportDirectory(job, true);
+            Path exportedRawPath = null;
+            Path exportedMetadataPath = null;
+            if (userExportDirectory != null) {
+                Path correctedExportDirectory =
+                        userExportDirectory.resolve("corrected_masks").normalize();
+                Files.createDirectories(correctedExportDirectory);
+                exportedRawPath = correctedExportDirectory.resolve(
+                        correctedMaskPath.getFileName());
+                exportedMetadataPath = correctedExportDirectory.resolve(
+                        correctedMetadataPath.getFileName());
+                Files.copy(
+                        correctedMaskPath,
+                        exportedRawPath,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+                Files.copy(
+                        correctedMetadataPath,
+                        exportedMetadataPath,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            }
+
+            CorrectedMaskVersion maskVersion = new CorrectedMaskVersion();
+            maskVersion.setJobId(jobId);
+            maskVersion.setVersion(version);
+            maskVersion.setMaskPath(correctedMaskPath.toString());
+            maskVersion.setMetadataPath(correctedMetadataPath.toString());
+            maskVersion.setChecksumSha256(checksumSha256);
+            maskVersion.setCreatedAt(LocalDateTime.now());
+            correctedMaskVersionMapper.insert(maskVersion);
 
             result.setCorrectedMaskPath(correctedMaskPath.toString());
             result.setUpdatedAt(LocalDateTime.now());
@@ -249,11 +342,17 @@ public class CacResultService {
             response.setCorrectedMaskMetadataPath(correctedMetadataPath.toString());
             response.setCorrectedMaskBytes(Files.size(correctedMaskPath));
             response.setMetadataBytes(Files.size(correctedMetadataPath));
+            response.setExportDirectory(
+                    userExportDirectory == null ? null : userExportDirectory.toString());
+            response.setExportedCorrectedRawPath(
+                    exportedRawPath == null ? null : exportedRawPath.toString());
+            response.setExportedCorrectedMetadataPath(
+                    exportedMetadataPath == null ? null : exportedMetadataPath.toString());
 
-            log.info("Corrected mask upload success: jobId={}, version={}, mask={}, metadata={}, bytes={}/{}, maskNonzeroVoxelCount={}, eligibleVoxelCountHU130={}, checksum={}",
+            log.info("Corrected mask upload success: jobId={}, version={}, mask={}, metadata={}, bytes={}/{}, maskNonzeroVoxelCount={}, eligibleVoxelCountHU130={}, clientChecksum={}, sha256={}",
                     jobId, version, correctedMaskPath, correctedMetadataPath,
                     response.getCorrectedMaskBytes(), response.getMetadataBytes(),
-                    maskNonzeroVoxelCount, eligibleVoxelCountHU130, workingMaskChecksum);
+                    maskNonzeroVoxelCount, eligibleVoxelCountHU130, workingMaskChecksum, checksumSha256);
             return response;
         } catch (IOException e) {
             log.error("Corrected mask upload failed: jobId={}", jobId, e);
@@ -287,6 +386,18 @@ public class CacResultService {
 
         Path scriptPath = resolveConfiguredPath(recalculateScriptPath);
         ensureReadableFile(scriptPath, "Recalculation script");
+        Path pythonExecutable = resolveAbsoluteExecutable(recalculatePythonExecutable);
+        Path segmentCacsSrc = resolveSegmentCacsSource();
+        Path userExportDirectory;
+        try {
+            userExportDirectory = userExportDirectory(job, true);
+        } catch (IOException e) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to prepare the selected output directory.",
+                    e
+            );
+        }
 
         Path outputDir = storageRoot()
                 .resolve("jobs")
@@ -308,14 +419,22 @@ public class CacResultService {
             correctedMaskBytes = -1;
         }
         BigDecimal oldCorrectedScore = result.getCorrectedAgatstonScore();
-        List<String> command = List.of(
-                recalculatePythonExecutable,
+        List<String> command = new ArrayList<>(List.of(
+                pythonExecutable.toString(),
                 scriptPath.toString(),
                 "--input-volume", inputPath.toString(),
                 "--corrected-mask", correctedMaskPath.toString(),
                 "--metadata", correctedMetadataPath.toString(),
-                "--output", outputJsonPath.toString()
-        );
+                "--output", outputJsonPath.toString(),
+                "--segmentcacs-src", segmentCacsSrc.toString()
+        ));
+        Path exportedCorrectedMaskPath = null;
+        if (userExportDirectory != null) {
+            exportedCorrectedMaskPath = userExportDirectory.resolve(
+                    String.format("corrected_mask_v%d.nrrd", version));
+            command.add("--export-mask");
+            command.add(exportedCorrectedMaskPath.toString());
+        }
 
         log.info("Recalculate using DB current correctedMaskPath: {}", correctedMaskPath);
         log.info("Corrected-mask recalculation starting: jobId={}, version={}, input={}, correctedMask={}, metadata={}, maskBytes={}, output={}, oldCorrectedScore={}",
@@ -336,6 +455,15 @@ public class CacResultService {
             result.setCorrectedAt(LocalDateTime.now());
             result.setUpdatedAt(LocalDateTime.now());
             cacResultMapper.updateById(result);
+            if (userExportDirectory != null) {
+                Path exportedCorrectedResultPath = userExportDirectory.resolve(
+                        String.format("recalculate_result_v%d.json", version));
+                Files.copy(
+                        outputJsonPath,
+                        exportedCorrectedResultPath,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            }
 
             log.info("Corrected-mask recalculation success: jobId={}, version={}, oldCorrectedScore={}, newCorrectedScore={}, riskGrade={}, resultJson={}",
                     jobId, version, oldCorrectedScore, agatstonScore, riskGrade, outputJsonPath);
@@ -346,6 +474,17 @@ public class CacResultService {
             response.setMinHUInsideMask(intValue(payload, "minHUInsideMask"));
             response.setUsedOfficialSegmentCacsScoring(payload.path("usedOfficialSegmentCacsScoring").asBoolean(false));
             response.setModelInferenceSkipped(payload.path("modelInferenceSkipped").asBoolean(false));
+            response.setExportDirectory(
+                    userExportDirectory == null ? null : userExportDirectory.toString());
+            response.setExportedCorrectedMaskPath(
+                    exportedCorrectedMaskPath == null
+                            ? null
+                            : exportedCorrectedMaskPath.toString());
+            if (userExportDirectory != null) {
+                response.setExportedCorrectedResultJsonPath(
+                        userExportDirectory.resolve(
+                                String.format("recalculate_result_v%d.json", version)).toString());
+            }
             return response;
         } catch (IOException e) {
             log.error("Failed to read recalculation output: jobId={}, output={}", jobId, outputJsonPath, e);
@@ -371,7 +510,7 @@ public class CacResultService {
 
     private AnalysisJob ensureSuccessfulJob(Long jobId, String operationName) {
         AnalysisJob job = ensureJobExists(jobId);
-        if (!"SUCCESS".equals(job.getStatus())) {
+        if (!isSuccessfulStatus(job.getStatus())) {
             log.warn("{} rejected: jobId={}, status={}", operationName, jobId, job.getStatus());
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -398,6 +537,25 @@ public class CacResultService {
 
     private Path resolveConfiguredPath(String value) {
         Path path = Paths.get(value).toAbsolutePath().normalize();
+        return path;
+    }
+
+    private Path resolveAbsoluteExecutable(String value) {
+        if (value == null || value.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "CAC_PYTHON_EXECUTABLE is not configured for recalculation."
+            );
+        }
+        Path path = Paths.get(value);
+        if (!path.isAbsolute()) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "CAC_PYTHON_EXECUTABLE must be an absolute path."
+            );
+        }
+        path = path.normalize();
+        ensureReadableFile(path, "Configured Python executable");
         return path;
     }
 
@@ -517,7 +675,121 @@ public class CacResultService {
         response.setReportPath(result.getReportPath());
         response.setCreatedAt(result.getCreatedAt());
         response.setUpdatedAt(result.getUpdatedAt());
+        applyExportPaths(response, result);
         return response;
+    }
+
+    private Path userExportDirectory(AnalysisJob job, boolean create) throws IOException {
+        if (job == null || job.getOutputPath() == null || job.getOutputPath().isBlank()) {
+            return null;
+        }
+        Path configured = Paths.get(job.getOutputPath());
+        if (!configured.isAbsolute()) {
+            return null;
+        }
+        Path outputBase = configured.normalize();
+        Path legacyManagedOutput = storageRoot()
+                .resolve("jobs")
+                .resolve(String.valueOf(job.getId()))
+                .resolve("output")
+                .normalize();
+        if (outputBase.equals(legacyManagedOutput)) {
+            return null;
+        }
+        Path exportDirectory = outputBase
+                .resolve("cac_job_" + job.getId())
+                .toAbsolutePath()
+                .normalize();
+        if (!exportDirectory.startsWith(outputBase)) {
+            throw new IOException("The selected output directory is invalid.");
+        }
+        if (create) {
+            Files.createDirectories(exportDirectory);
+            if (!Files.isDirectory(exportDirectory) || !Files.isWritable(exportDirectory)) {
+                throw new IOException("The selected output directory is not writable.");
+            }
+        }
+        return exportDirectory;
+    }
+
+    private void applyExportPaths(CacResultResponse response, CacResult result) {
+        AnalysisJob job = analysisJobMapper.selectById(result.getJobId());
+        try {
+            Path exportDirectory = userExportDirectory(job, false);
+            if (exportDirectory == null) {
+                return;
+            }
+            response.setExportDirectory(exportDirectory.toString());
+            Path ctPath = exportDirectory.resolve("ct.nrrd");
+            Path aiMaskPath = exportDirectory.resolve("ai_mask.nrrd");
+            Path resultJsonPath = exportDirectory.resolve("result.json");
+            if (Files.isRegularFile(ctPath)) {
+                response.setExportedCtVolumePath(ctPath.toString());
+            }
+            if (Files.isRegularFile(aiMaskPath)) {
+                response.setExportedAiMaskPath(aiMaskPath.toString());
+            }
+            if (Files.isRegularFile(resultJsonPath)) {
+                response.setExportedResultJsonPath(resultJsonPath.toString());
+            }
+            if (result.getCorrectedMaskPath() != null
+                    && !result.getCorrectedMaskPath().isBlank()) {
+                Path correctedPath = Paths.get(result.getCorrectedMaskPath());
+                Path versionDirectory = correctedPath.getParent();
+                String versionName = versionDirectory == null
+                        ? ""
+                        : versionDirectory.getFileName().toString();
+                if (versionName.matches("v\\d+")) {
+                    Path exportedCorrectedMask = exportDirectory.resolve(
+                            "corrected_mask_" + versionName + ".nrrd");
+                    if (Files.isRegularFile(exportedCorrectedMask)) {
+                        response.setExportedCorrectedMaskPath(
+                                exportedCorrectedMask.toString());
+                    }
+                    Path exportedCorrectedResult = exportDirectory.resolve(
+                            "recalculate_result_" + versionName + ".json");
+                    if (Files.isRegularFile(exportedCorrectedResult)) {
+                        response.setExportedCorrectedResultJsonPath(
+                                exportedCorrectedResult.toString());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Could not resolve user export paths for jobId={}: {}",
+                    result.getJobId(), e.getMessage());
+        }
+    }
+
+    private Path resolveSegmentCacsSource() {
+        if (recalculateSegmentCacsSrc == null || recalculateSegmentCacsSrc.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "SEGMENT-CACS source path is not configured for recalculation."
+            );
+        }
+        Path configured = resolveConfiguredPath(recalculateSegmentCacsSrc);
+        Path sourcePath = Files.isDirectory(configured.resolve("src"))
+                ? configured.resolve("src").normalize()
+                : configured;
+        if (!Files.isDirectory(sourcePath) || !Files.isReadable(sourcePath)) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "SEGMENT-CACS source directory is not readable: " + sourcePath
+            );
+        }
+        return sourcePath;
+    }
+
+    private String sha256(Path path) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (DigestInputStream input = new DigestInputStream(Files.newInputStream(path), digest)) {
+                input.transferTo(java.io.OutputStream.nullOutputStream());
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable.", e);
+        }
     }
 
     private boolean isSuccessfulStatus(String status) {

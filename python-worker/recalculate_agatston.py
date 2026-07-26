@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 
-DEFAULT_SEGMENTCACS_SRC = os.getenv("SEGMENTCACS_SRC", "/root/autodl-tmp/SEGMENT-CACS/src")
+DEFAULT_SEGMENTCACS_SRC = os.getenv("SEGMENTCACS_SRC")
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metadata", help="Corrected raw mask metadata JSON path")
     parser.add_argument("--output", required=True, help="Output recalculation JSON path")
     parser.add_argument("--segmentcacs-src", default=DEFAULT_SEGMENTCACS_SRC, help="SEGMENT-CACS src directory")
+    parser.add_argument("--export-mask", help="Optional user-visible corrected mask NRRD path")
     return parser.parse_args()
 
 
@@ -54,7 +55,16 @@ def read_ct_volume(path: Path):
 
     image_org = sitk.GetArrayFromImage(image_sitk)
     spacing = image_sitk.GetSpacing()
-    return image_org, spacing
+    return image_org, spacing, image_sitk
+
+
+def write_mask_image(mask: np.ndarray, reference_image, output_path: Path) -> None:
+    import SimpleITK as sitk
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_image = sitk.GetImageFromArray(mask.astype(np.uint8, copy=False))
+    output_image.CopyInformation(reference_image)
+    sitk.WriteImage(output_image, str(output_path), True)
 
 
 def read_mask(mask_path: Path, metadata_path: Path | None) -> tuple[np.ndarray, dict[str, Any]]:
@@ -207,12 +217,17 @@ def main() -> int:
     mask_path = Path(args.corrected_mask).expanduser().resolve()
     metadata_path = Path(args.metadata).expanduser().resolve() if args.metadata else None
     output_path = Path(args.output).expanduser().resolve()
+    if not args.segmentcacs_src:
+        raise RuntimeError("SEGMENT-CACS src directory is required.")
     segmentcacs_src = Path(args.segmentcacs_src).expanduser().resolve()
 
     compute_agatston_artery = import_segmentcacs_scoring(segmentcacs_src)
-    image_org, spacing = read_ct_volume(input_path)
+    image_org, spacing, reference_image = read_ct_volume(input_path)
     mask, mask_metadata = read_mask(mask_path, metadata_path)
     validate_shapes(image_org, mask)
+    export_mask_path = Path(args.export_mask).expanduser().resolve() if args.export_mask else None
+    if export_mask_path is not None:
+        write_mask_image(mask, reference_image, export_mask_path)
 
     summary = mask_value_summary(mask)
     input_diagnostics = scoring_input_diagnostics(image_org, mask)
@@ -230,6 +245,7 @@ def main() -> int:
         mask_metadata=mask_metadata,
     )
     result.update(input_diagnostics)
+    result["exportedCorrectedMaskPath"] = str(export_mask_path) if export_mask_path else None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -242,6 +258,7 @@ def main() -> int:
         "maxHUInsideMask": result["maxHUInsideMask"],
         "usedOfficialSegmentCacsScoring": True,
         "modelInferenceSkipped": True,
+        "exportedCorrectedMaskPath": result["exportedCorrectedMaskPath"],
     }))
     return 0
 

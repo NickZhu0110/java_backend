@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -91,10 +92,11 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
             Path inputSeries = validateInputSeries(request.getInputPath());
             validateLocalRequest(request);
             RuntimePaths runtimePaths = validateRuntimePaths();
+            Path userExportDirectory =
+                    prepareUserExportDirectory(inputSeries, request.getOutputPath(), jobId);
 
             Files.createDirectories(outputRoot);
             writeInputMetadata(jobRoot, inputSeries);
-            jobLifecycleService.setManagedOutputPath(jobId, outputRoot.toString());
 
             update(jobId, "PREPARING_INPUT", 15, null);
             List<String> command = buildCommand(runtimePaths, inputSeries, outputRoot);
@@ -129,6 +131,7 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
 
             update(jobId, "VALIDATING_OUTPUT", 75, null);
             ValidatedResult validatedResult = validateOutput(outputRoot);
+            exportInferenceArtifacts(validatedResult, userExportDirectory);
 
             update(jobId, "LOADING_RESULT", 90, null);
             persistResult(jobId, validatedResult);
@@ -174,6 +177,57 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
         if (device != null && !device.isBlank() && !"cpu".equalsIgnoreCase(device)) {
             throw new IllegalArgumentException("Local Windows analysis is CPU-only.");
         }
+    }
+
+    private Path prepareUserExportDirectory(
+            Path inputSeries,
+            String outputPathValue,
+            Long jobId
+    ) throws IOException {
+        if (outputPathValue == null || outputPathValue.isBlank()) {
+            throw new IllegalArgumentException("Select an output directory for exported results.");
+        }
+        Path configured = Paths.get(outputPathValue);
+        if (!configured.isAbsolute()) {
+            throw new IllegalArgumentException("The output directory must be an absolute path.");
+        }
+        Path outputBase = configured.normalize();
+        if (outputBase.equals(inputSeries) || outputBase.startsWith(inputSeries)) {
+            throw new IllegalArgumentException(
+                    "The output directory must not be inside the source DICOM directory.");
+        }
+        Files.createDirectories(outputBase);
+        if (!Files.isDirectory(outputBase) || !Files.isWritable(outputBase)) {
+            throw new IllegalArgumentException("The selected output directory is not writable.");
+        }
+        Path jobExportDirectory =
+                outputBase.resolve("cac_job_" + jobId).toAbsolutePath().normalize();
+        if (!jobExportDirectory.startsWith(outputBase)) {
+            throw new IllegalArgumentException("The job export directory is invalid.");
+        }
+        Files.createDirectories(jobExportDirectory);
+        return jobExportDirectory;
+    }
+
+    private void exportInferenceArtifacts(
+            ValidatedResult result,
+            Path userExportDirectory
+    ) throws IOException {
+        Files.copy(
+                result.ctPath(),
+                userExportDirectory.resolve("ct.nrrd"),
+                StandardCopyOption.REPLACE_EXISTING
+        );
+        Files.copy(
+                result.maskPath(),
+                userExportDirectory.resolve("ai_mask.nrrd"),
+                StandardCopyOption.REPLACE_EXISTING
+        );
+        Files.copy(
+                result.resultPath(),
+                userExportDirectory.resolve("result.json"),
+                StandardCopyOption.REPLACE_EXISTING
+        );
     }
 
     private RuntimePaths validateRuntimePaths() {

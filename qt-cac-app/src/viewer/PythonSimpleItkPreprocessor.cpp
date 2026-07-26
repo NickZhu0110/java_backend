@@ -18,6 +18,11 @@ QString PythonSimpleItkPreprocessor::findProjectRoot() const
 
 QString PythonSimpleItkPreprocessor::scriptPath() const
 {
+    const QString configuredScript =
+        qEnvironmentVariable("CAC_CONVERT_SCRIPT_PATH").trimmed();
+    if (!configuredScript.isEmpty()) {
+        return QDir::cleanPath(configuredScript);
+    }
     return QDir(findProjectRoot()).filePath(QStringLiteral("tools/convert_case_to_raw_volume.py"));
 }
 
@@ -73,14 +78,26 @@ bool PythonSimpleItkPreprocessor::runPreprocessor(const QString &caseCacheDir,
         arguments << QStringLiteral("--mask") << maskPath;
     }
 
+    const QString pythonExecutable =
+        qEnvironmentVariable("CAC_PYTHON_EXECUTABLE").trimmed();
+    if (pythonExecutable.isEmpty() || !QFileInfo(pythonExecutable).isAbsolute()
+        || !QFileInfo::exists(pythonExecutable)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "CAC_PYTHON_EXECUTABLE must reference the controlled absolute python.exe.");
+        }
+        return false;
+    }
+
     QProcess process;
-    process.setProgram(QStringLiteral("python3"));
+    process.setProgram(pythonExecutable);
     process.setArguments(arguments);
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
     if (!process.waitForStarted(5000)) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("Failed to start python3 for SimpleITK preprocessing.");
+            *errorMessage = QStringLiteral(
+                "Failed to start the controlled Python runtime for SimpleITK preprocessing.");
         }
         return false;
     }

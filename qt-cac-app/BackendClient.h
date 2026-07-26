@@ -18,6 +18,7 @@ public:
 
     void loadSettings();
     void setBaseUrl(const QString &baseUrl);
+    void checkHealth();
     void createJob(const QJsonObject &payload);
     void getJob(qint64 jobId);
     void getJobResult(qint64 jobId);
@@ -26,6 +27,7 @@ signals:
     void jobCreated(qint64 jobId);
     void jobFetched(const QJsonObject &job);
     void jobResultFetched(const QJsonObject &result);
+    void healthChecked(bool available, const QString &message);
     void errorOccurred(const QString &message);
 
 private:

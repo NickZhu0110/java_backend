@@ -23,7 +23,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         "SimpleITK is required for temporary preprocessing. "
-        "Install it with: python3 -m pip install SimpleITK"
+        "Install it into the controlled CAC Python runtime."
     ) from exc
 
 

@@ -285,7 +285,7 @@ private:
     bool m_hasMask = false;
     bool m_hasWorkingMask = false;
     bool m_hasUnsavedMaskEdits = false;
-    bool m_usingSyntheticFallback = true;
+    bool m_usingSyntheticFallback = false;
     bool m_multiStructurePreviewUiActive = false;
     MultiStructureVolume m_niftiReviewVolume;
     std::array<int, 3> m_normalSliceIndicesBeforeNifti = {0, 0, 0};

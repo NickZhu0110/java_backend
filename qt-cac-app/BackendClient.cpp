@@ -17,8 +17,15 @@ BackendClient::BackendClient(QObject *parent)
 void BackendClient::loadSettings()
 {
     QSettings settings;
-    setBaseUrl(settings.value(QStringLiteral("server/backendUrl"),
-                              QStringLiteral("http://localhost:8080")).toString());
+    QString configuredUrl = qEnvironmentVariable("CAC_BACKEND_URL").trimmed();
+    if (configuredUrl.isEmpty()) {
+        configuredUrl = settings.value(QStringLiteral("server/backendUrl"),
+                                       QStringLiteral("http://127.0.0.1:6006")).toString();
+    }
+    if (configuredUrl == QStringLiteral("http://localhost:8080")) {
+        configuredUrl = QStringLiteral("http://127.0.0.1:6006");
+    }
+    setBaseUrl(configuredUrl);
 }
 
 void BackendClient::setBaseUrl(const QString &baseUrl)
@@ -28,8 +35,29 @@ void BackendClient::setBaseUrl(const QString &baseUrl)
         m_baseUrl.chop(1);
     }
     if (m_baseUrl.isEmpty()) {
-        m_baseUrl = QStringLiteral("http://localhost:8080");
+        m_baseUrl = QStringLiteral("http://127.0.0.1:6006");
     }
+}
+
+void BackendClient::checkHealth()
+{
+    QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/actuator/health")));
+    request.setTransferTimeout(5000);
+    QNetworkReply *reply = m_networkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const int httpStatus =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool available =
+            reply->error() == QNetworkReply::NoError
+            && httpStatus >= 200
+            && httpStatus < 300;
+        const QString message = available
+            ? QStringLiteral("Local backend is ready")
+            : QStringLiteral("Local backend health check failed: %1")
+                  .arg(reply->errorString());
+        emit healthChecked(available, message);
+        reply->deleteLater();
+    });
 }
 
 void BackendClient::createJob(const QJsonObject &payload)

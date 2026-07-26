@@ -81,9 +81,15 @@ CTViewerWidget::CTViewerWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();
-    createSyntheticStudy();
-    updateSliceImages();
-    updateSliceLabel();
+    if (qEnvironmentVariableIntValue("CAC_ENABLE_SYNTHETIC_DEMO") == 1) {
+        createSyntheticStudy();
+        updateSliceImages();
+        updateSliceLabel();
+    } else {
+        m_usingSyntheticFallback = false;
+        updateToolState();
+        updateMaskStatusLabel();
+    }
 }
 
 void CTViewerWidget::loadVolumeFromLocalPath(const QString &path)
@@ -112,8 +118,7 @@ void CTViewerWidget::loadJobFilesFromCache(const QString &caseCacheDir)
         qWarning().noquote() << warning;
     }
     if (!loaded.volume.isValid()) {
-        qWarning() << "Could not load real CT case; synthetic viewer fallback remains active."
-                   << errorMessage;
+        qWarning() << "Could not load real CT case." << errorMessage;
         return;
     }
 

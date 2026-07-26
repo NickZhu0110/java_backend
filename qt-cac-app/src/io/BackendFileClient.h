@@ -36,6 +36,11 @@ signals:
     void scoreRecalculationFailed(qint64 jobId, const QString &message, int httpStatus);
 
 private:
+    void downloadToFile(const QString &url,
+                        qint64 jobId,
+                        const QString &destinationPath,
+                        bool aiMask);
+
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
 };

@@ -84,13 +84,6 @@ public class JobLifecycleService {
         return job;
     }
 
-    public void setManagedOutputPath(Long id, String outputPath) {
-        AnalysisJob job = getJob(id);
-        job.setOutputPath(outputPath);
-        job.setUpdatedAt(LocalDateTime.now());
-        analysisJobMapper.updateById(job);
-    }
-
     private void publish(AnalysisJob job) {
         jobStatusCache.saveJobStatus(job.getId(), job.getStatus(), job.getProgress());
         jobWebSocketHandler.broadcastJobStatus(job.getId(), job.getStatus(), job.getProgress());

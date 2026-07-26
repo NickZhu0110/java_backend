@@ -44,6 +44,18 @@ public class CacResultResponse {
 
     private Boolean modelInferenceSkipped;
 
+    private String exportDirectory;
+
+    private String exportedCtVolumePath;
+
+    private String exportedAiMaskPath;
+
+    private String exportedResultJsonPath;
+
+    private String exportedCorrectedMaskPath;
+
+    private String exportedCorrectedResultJsonPath;
+
     private String reportPath;
 
     private LocalDateTime createdAt;

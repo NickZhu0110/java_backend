@@ -67,9 +67,9 @@ void ServerSettingsDialog::loadSettings()
 {
     QSettings settings;
     ui->backendUrlLineEdit->setText(settings.value(QStringLiteral("server/backendUrl"),
-                                                   QStringLiteral("http://localhost:8080")).toString());
+                                                   QStringLiteral("http://127.0.0.1:6006")).toString());
     ui->webSocketUrlLineEdit->setText(settings.value(QStringLiteral("server/webSocketUrl"),
-                                                     QStringLiteral("ws://localhost:8080/ws/jobs")).toString());
+                                                     QStringLiteral("ws://127.0.0.1:6006/ws/jobs")).toString());
     ui->sshHostLineEdit->setText(settings.value(QStringLiteral("ssh/host")).toString());
     ui->sshPortSpinBox->setValue(settings.value(QStringLiteral("ssh/port"), 22).toInt());
     ui->sshUsernameLineEdit->setText(settings.value(QStringLiteral("ssh/username")).toString());

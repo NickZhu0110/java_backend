@@ -2,26 +2,33 @@
 
 #include "viewer/CaseVolumeLoader.h"
 #include "viewer/Mask3DViewerWidget.h"
+#include "viewer/MultiStructureNiftiLoader.h"
 
 #include <QButtonGroup>
 #include <QBrush>
 #include <QCheckBox>
 #include <QCursor>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
+#include <QFutureWatcher>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QDebug>
 #include <QEvent>
+#include <QEventLoop>
+#include <QFileDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QPainterPath>
 #include <QPen>
 #include <QPushButton>
+#include <QProgressDialog>
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QSignalBlocker>
@@ -29,6 +36,10 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+
+#include <QtConcurrent/QtConcurrentRun>
+
+#include <vtkImageData.h>
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +54,13 @@ struct MaskDiagnostics
     int minHUInsideMask = std::numeric_limits<int>::max();
     int maxHUInsideMask = std::numeric_limits<int>::min();
     quint64 checksum = 1469598103934665603ULL;
+};
+
+struct NiftiLoadResult
+{
+    MultiStructureVolume volume;
+    QString errorMessage;
+    bool loaded = false;
 };
 
 quint64 updateChecksum(quint64 checksum, uint8_t value)
@@ -82,7 +100,6 @@ void CTViewerWidget::loadMaskFromLocalPath(const QString &path)
 
 void CTViewerWidget::loadJobFilesFromCache(const QString &caseCacheDir)
 {
-    m_caseCacheDir = caseCacheDir;
     qInfo() << "Real case cache detected; attempting CT/mask load:" << caseCacheDir;
     CaseVolumeLoader loader;
     QString processLog;
@@ -100,9 +117,60 @@ void CTViewerWidget::loadJobFilesFromCache(const QString &caseCacheDir)
         return;
     }
 
+    m_caseCacheDir = caseCacheDir;
     qInfo() << "Loading real CT volume into viewer"
             << loaded.volume.width << "x" << loaded.volume.height << "x" << loaded.volume.depth;
     setVolumeAndMask(loaded.volume, loaded.mask, loaded.hasMask);
+}
+
+bool CTViewerWidget::loadMultiStructurePreview(const QString &ctPath,
+                                               const QString &segmentationPath,
+                                               QString *errorMessage)
+{
+    if (!m_mask3DViewer) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("The 3D viewer is not available.");
+        }
+        return false;
+    }
+    finishBrushStroke();
+    hideBrushCursor();
+
+    MultiStructureVolume loadedVolume;
+    MultiStructureNiftiLoader loader;
+    if (!loader.load(ctPath, segmentationPath, &loadedVolume, errorMessage)) {
+        return false;
+    }
+    return activateNiftiReview(
+        std::move(loadedVolume), segmentationPath, errorMessage);
+}
+
+bool CTViewerWidget::activateNiftiReview(
+    MultiStructureVolume loadedVolume,
+    const QString &segmentationPath,
+    QString *errorMessage)
+{
+    if (!m_mask3DViewer->setMultiStructurePreview(loadedVolume, errorMessage)) {
+        return false;
+    }
+
+    if (!m_multiStructurePreviewUiActive) {
+        m_normalSliceIndicesBeforeNifti = {
+            panel(ViewOrientation::Sagittal).sliceIndex,
+            panel(ViewOrientation::Coronal).sliceIndex,
+            panel(ViewOrientation::Axial).sliceIndex
+        };
+    }
+    m_niftiReviewVolume = std::move(loadedVolume);
+    rebuildMultiStructureControls();
+    setMultiStructurePreviewUiActive(true);
+    configureNiftiReviewMpr();
+    if (m_multiStructureStatusLabel) {
+        m_multiStructureStatusLabel->setText(
+            QStringLiteral("NIfTI Review \u2014 Read Only: %1")
+                .arg(QFileInfo(segmentationPath).fileName()));
+    }
+    return true;
 }
 
 bool CTViewerWidget::hasUnsavedEdits() const
@@ -123,6 +191,10 @@ bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
 
     ViewPanel *eventPanel = panelForViewport(watched);
     if (!eventPanel) {
+        return QWidget::eventFilter(watched, event);
+    }
+
+    if (m_multiStructurePreviewUiActive) {
         return QWidget::eventFilter(watched, event);
     }
 
@@ -317,6 +389,9 @@ void CTViewerWidget::setupUi()
     m_refresh3DButton->setToolTip(QStringLiteral("Rebuild 3D mask surface from current working mask"));
     m_reset3DCameraButton = new QPushButton(QStringLiteral("Reset Camera"), this);
     m_reset3DCameraButton->setToolTip(QStringLiteral("Reset 3D camera"));
+    m_loadMultiStructureButton = new QPushButton(QStringLiteral("Load Multi-Structure"), this);
+    m_loadMultiStructureButton->setToolTip(
+        QStringLiteral("Directly load CT and categorical mask NIfTI files for read-only 3D preview; no inference"));
     for (QPushButton *button : {m_undoButton, m_redoButton, m_saveMaskButton, m_fitAllButton, m_refresh3DButton, m_reset3DCameraButton}) {
         button->setMinimumWidth(58);
         button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -342,6 +417,7 @@ void CTViewerWidget::setupUi()
     m_globalZoomSlider->setMinimumWidth(180);
     m_globalZoomLabel = new QLabel(QStringLiteral("Global 1.00x"), this);
     m_globalZoomLabel->setMinimumWidth(92);
+    m_loadMultiStructureButton->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
 
     auto *toolLayout = new QHBoxLayout;
     toolLayout->setContentsMargins(4, 4, 4, 0);
@@ -371,6 +447,7 @@ void CTViewerWidget::setupUi()
     zoomLayout->addWidget(m_globalZoomSlider, 1);
     zoomLayout->addWidget(m_globalZoomLabel);
     zoomLayout->addWidget(m_fitAllButton);
+    zoomLayout->addWidget(m_loadMultiStructureButton);
 
     auto *statusLayout = new QHBoxLayout;
     statusLayout->setContentsMargins(4, 0, 4, 4);
@@ -451,6 +528,8 @@ void CTViewerWidget::setupUi()
             m_mask3DViewer->resetCamera();
         }
     });
+    connect(m_loadMultiStructureButton, &QPushButton::clicked,
+            this, &CTViewerWidget::chooseMultiStructureFiles);
 
     updateToolState();
 }
@@ -554,6 +633,16 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_move3DPlanesCheckBox->setToolTip(
         QStringLiteral("Drag visible slice planes to change the linked MPR slice"));
 
+    m_multiStructureStatusLabel = new QLabel(container);
+    m_multiStructureStatusLabel->setWordWrap(true);
+    m_multiStructureStatusLabel->setVisible(false);
+    m_multiStructureControlsWidget = new QWidget(container);
+    m_multiStructureControlsLayout = new QGridLayout(m_multiStructureControlsWidget);
+    m_multiStructureControlsLayout->setContentsMargins(4, 0, 4, 0);
+    m_multiStructureControlsLayout->setHorizontalSpacing(6);
+    m_multiStructureControlsLayout->setVerticalSpacing(2);
+    m_multiStructureControlsWidget->setVisible(false);
+
     auto *opacityLayout = new QHBoxLayout;
     opacityLayout->setContentsMargins(4, 0, 4, 0);
     opacityLayout->setSpacing(6);
@@ -603,6 +692,8 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     layout->addWidget(titleLabel);
     layout->addWidget(m_mask3DViewer, 1);
     layout->addLayout(opacityLayout);
+    layout->addWidget(m_multiStructureStatusLabel);
+    layout->addWidget(m_multiStructureControlsWidget);
     return container;
 }
 
@@ -738,29 +829,93 @@ QSize CTViewerWidget::sliceImageSize(ViewOrientation orientation) const
     return mprGeometry(orientation).imageSize;
 }
 
+bool CTViewerWidget::displayVolumeValid() const
+{
+    return m_multiStructurePreviewUiActive
+        ? m_niftiReviewVolume.isValid()
+        : m_volume.isValid();
+}
+
+std::array<int, 3> CTViewerWidget::displayVolumeDimensions() const
+{
+    if (m_multiStructurePreviewUiActive && m_niftiReviewVolume.isValid()) {
+        return m_niftiReviewVolume.ctGeometry.dimensions;
+    }
+    return {m_volume.width, m_volume.height, m_volume.depth};
+}
+
+double CTViewerWidget::displayCtValue(int x, int y, int z) const
+{
+    if (m_multiStructurePreviewUiActive && m_niftiReviewVolume.isValid()) {
+        vtkImageData *image = m_niftiReviewVolume.ctImage;
+        const auto dimensions = m_niftiReviewVolume.ctGeometry.dimensions;
+        if (!image || x < 0 || y < 0 || z < 0
+            || x >= dimensions[0] || y >= dimensions[1] || z >= dimensions[2]) {
+            return 0.0;
+        }
+        const double rawValue = image->GetScalarComponentAsDouble(x, y, z, 0);
+        const double slope = std::isfinite(m_niftiReviewVolume.ctRescaleSlope)
+                && m_niftiReviewVolume.ctRescaleSlope != 0.0
+            ? m_niftiReviewVolume.ctRescaleSlope
+            : 1.0;
+        const double intercept = std::isfinite(m_niftiReviewVolume.ctRescaleIntercept)
+            ? m_niftiReviewVolume.ctRescaleIntercept
+            : 0.0;
+        const double calibratedValue = rawValue * slope + intercept;
+        return std::isfinite(calibratedValue) ? calibratedValue : 0.0;
+    }
+    return m_volume.isValid() ? static_cast<double>(m_volume.value(x, y, z)) : 0.0;
+}
+
 CTViewerWidget::MprSliceGeometry CTViewerWidget::mprGeometry(ViewOrientation orientation) const
 {
     MprSliceGeometry geometry;
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return geometry;
     }
 
+    const auto dimensions = displayVolumeDimensions();
     const double spacingX = volumeSpacing(0);
     const double spacingY = volumeSpacing(1);
     const double spacingZ = volumeSpacing(2);
     switch (orientation) {
     case ViewOrientation::Axial:
-        geometry.sceneSizeMm = QSizeF(m_volume.width * spacingX,
-                                      m_volume.height * spacingY);
+        geometry.sceneSizeMm = QSizeF(dimensions[0] * spacingX,
+                                      dimensions[1] * spacingY);
         break;
     case ViewOrientation::Coronal:
-        geometry.sceneSizeMm = QSizeF(m_volume.width * spacingX,
-                                      m_volume.depth * spacingZ);
+        geometry.sceneSizeMm = QSizeF(dimensions[0] * spacingX,
+                                      dimensions[2] * spacingZ);
         break;
     case ViewOrientation::Sagittal:
-        geometry.sceneSizeMm = QSizeF(m_volume.height * spacingY,
-                                      m_volume.depth * spacingZ);
+        geometry.sceneSizeMm = QSizeF(dimensions[1] * spacingY,
+                                      dimensions[2] * spacingZ);
         break;
+    }
+
+    // The dev CAC viewer's normal path remains unchanged. NIfTI review keeps
+    // one output pixel per native in-plane voxel and expresses physical aspect
+    // ratio through the graphics-item scale. This avoids an isotropic
+    // trilinear resample followed by a second viewport interpolation.
+    if (m_multiStructurePreviewUiActive) {
+        switch (orientation) {
+        case ViewOrientation::Axial:
+            geometry.imageSize = QSize(dimensions[0], dimensions[1]);
+            geometry.itemScaleMmPerPixel = QSizeF(spacingX, spacingY);
+            geometry.displaySpacingMm = std::min(spacingX, spacingY);
+            break;
+        case ViewOrientation::Coronal:
+            geometry.imageSize = QSize(dimensions[0], dimensions[2]);
+            geometry.itemScaleMmPerPixel = QSizeF(spacingX, spacingZ);
+            geometry.displaySpacingMm = std::min(spacingX, spacingZ);
+            break;
+        case ViewOrientation::Sagittal:
+            geometry.imageSize = QSize(dimensions[1], dimensions[2]);
+            geometry.itemScaleMmPerPixel = QSizeF(spacingY, spacingZ);
+            geometry.displaySpacingMm = std::min(spacingY, spacingZ);
+            break;
+        }
+        return geometry;
     }
 
     geometry.displaySpacingMm = displaySpacingMm(orientation);
@@ -784,17 +939,18 @@ QSizeF CTViewerWidget::sliceItemScale(ViewOrientation orientation) const
 
 int CTViewerWidget::sliceCount(ViewOrientation orientation) const
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return 0;
     }
 
+    const auto dimensions = displayVolumeDimensions();
     switch (orientation) {
     case ViewOrientation::Axial:
-        return m_volume.depth;
+        return dimensions[2];
     case ViewOrientation::Coronal:
-        return m_volume.height;
+        return dimensions[1];
     case ViewOrientation::Sagittal:
-        return m_volume.width;
+        return dimensions[0];
     }
     return 0;
 }
@@ -814,6 +970,27 @@ QString CTViewerWidget::orientationName(ViewOrientation orientation) const
 
 double CTViewerWidget::volumeSpacing(int axis, double fallback) const
 {
+    if (m_multiStructurePreviewUiActive && m_niftiReviewVolume.isValid()
+        && axis >= 0 && axis < 3) {
+        vtkMatrix4x4 *indexToWorld =
+            m_niftiReviewVolume.ctGeometry.indexToWorldRas;
+        if (indexToWorld) {
+            double squaredLength = 0.0;
+            for (int row = 0; row < 3; ++row) {
+                const double component = indexToWorld->GetElement(row, axis);
+                squaredLength += component * component;
+            }
+            const double affineSpacing = std::sqrt(squaredLength);
+            if (std::isfinite(affineSpacing) && affineSpacing > 0.0) {
+                return affineSpacing;
+            }
+        }
+        const double headerSpacing =
+            m_niftiReviewVolume.ctGeometry.spacing[static_cast<size_t>(axis)];
+        if (std::isfinite(headerSpacing) && headerSpacing > 0.0) {
+            return headerSpacing;
+        }
+    }
     if (axis >= 0 && axis < static_cast<int>(m_volume.spacing.size())
         && std::isfinite(m_volume.spacing[static_cast<size_t>(axis)])
         && m_volume.spacing[static_cast<size_t>(axis)] > 0.0) {
@@ -840,7 +1017,7 @@ double CTViewerWidget::displaySpacingMm(ViewOrientation orientation) const
 
 void CTViewerWidget::setSliceIndex(ViewOrientation orientation, int sliceIndex)
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return;
     }
 
@@ -865,10 +1042,11 @@ void CTViewerWidget::setSliceIndex(ViewOrientation orientation, int sliceIndex)
 
 void CTViewerWidget::updateAllSceneRects()
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return;
     }
 
+    const auto dimensions = displayVolumeDimensions();
     for (ViewOrientation orientation : {ViewOrientation::Axial, ViewOrientation::Coronal, ViewOrientation::Sagittal}) {
         ViewPanel &viewPanel = panel(orientation);
         const MprSliceGeometry geometry = mprGeometry(orientation);
@@ -876,7 +1054,7 @@ void CTViewerWidget::updateAllSceneRects()
             applyLayerScale(viewPanel);
             viewPanel.scene->setSceneRect(0, 0, geometry.sceneSizeMm.width(), geometry.sceneSizeMm.height());
             qInfo() << orientationName(orientation)
-                    << "volume=" << QSize(m_volume.width, m_volume.height) << "depth=" << m_volume.depth
+                    << "volume=" << QSize(dimensions[0], dimensions[1]) << "depth=" << dimensions[2]
                     << "spacing=(" << volumeSpacing(0) << "," << volumeSpacing(1) << "," << volumeSpacing(2) << ")"
                     << "physical scene size=(" << geometry.sceneSizeMm.width() << "," << geometry.sceneSizeMm.height() << ")"
                     << "output image=" << geometry.imageSize
@@ -907,7 +1085,7 @@ void CTViewerWidget::applyLayerScale(ViewPanel &viewPanel)
 void CTViewerWidget::updateFitScale(ViewOrientation orientation, const QPointF &preserveCenter)
 {
     ViewPanel &viewPanel = panel(orientation);
-    if (!viewPanel.view || !m_volume.isValid()) {
+    if (!viewPanel.view || !displayVolumeValid()) {
         return;
     }
 
@@ -1008,10 +1186,12 @@ void CTViewerWidget::updateGlobalZoomLabel()
 
 void CTViewerWidget::configure3DPositionPlanes()
 {
-    if (!m_mask3DViewer || !m_volume.isValid()) {
+    if (!m_mask3DViewer || !displayVolumeValid()) {
         return;
     }
-    m_mask3DViewer->setVolumeGeometry(m_volume);
+    if (!m_multiStructurePreviewUiActive) {
+        m_mask3DViewer->setVolumeGeometry(m_volume);
+    }
     m_mask3DViewer->setAxialSlice(panel(ViewOrientation::Axial).sliceIndex);
     m_mask3DViewer->setCoronalSlice(panel(ViewOrientation::Coronal).sliceIndex);
     m_mask3DViewer->setSagittalSlice(panel(ViewOrientation::Sagittal).sliceIndex);
@@ -1040,6 +1220,10 @@ void CTViewerWidget::refresh3DMaskSurface()
     if (!m_mask3DViewer) {
         return;
     }
+    if (m_multiStructurePreviewUiActive) {
+        leaveNiftiReviewMode();
+        return;
+    }
     if (m_hasWorkingMask && m_workingMask.isValid()) {
         m_mask3DViewer->refreshFromMask(m_workingMask);
         return;
@@ -1049,6 +1233,375 @@ void CTViewerWidget::refresh3DMaskSurface()
         return;
     }
     m_mask3DViewer->clear();
+}
+
+void CTViewerWidget::chooseMultiStructureFiles()
+{
+    const QString filter = QStringLiteral("NIfTI images (*.nii *.nii.gz);;All files (*)");
+    const QString ctPath = QFileDialog::getOpenFileName(this,
+                                                        QStringLiteral("Select CT NIfTI"),
+                                                        QString(),
+                                                        filter);
+    if (ctPath.isEmpty()) {
+        return;
+    }
+    const QString segmentationPath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Select categorical segmentation NIfTI"),
+        QFileInfo(ctPath).absolutePath(),
+        filter);
+    if (segmentationPath.isEmpty()) {
+        return;
+    }
+
+    auto *progress = new QProgressDialog(
+        QStringLiteral("Reading native NIfTI CT and categorical segmentation..."),
+        QString(),
+        0,
+        0,
+        this);
+    progress->setWindowTitle(QStringLiteral("NIfTI Review"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->show();
+
+    auto *watcher = new QFutureWatcher<NiftiLoadResult>(this);
+    connect(watcher, &QFutureWatcher<NiftiLoadResult>::finished, this,
+            [this, watcher, progress, segmentationPath]() {
+        NiftiLoadResult result = watcher->result();
+        watcher->deleteLater();
+        if (!result.loaded) {
+            progress->close();
+            progress->deleteLater();
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Multi-Structure Preview"),
+                QStringLiteral("The review was not changed.\n\n%1")
+                    .arg(result.errorMessage));
+            return;
+        }
+
+        progress->setLabelText(
+            QStringLiteral("Building label surfaces and dev slice-card overlays..."));
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        QString activationError;
+        const bool activated = activateNiftiReview(
+            std::move(result.volume), segmentationPath, &activationError);
+        progress->close();
+        progress->deleteLater();
+        if (!activated) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Multi-Structure Preview"),
+                QStringLiteral("The review was not changed.\n\n%1")
+                    .arg(activationError));
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([ctPath, segmentationPath]() {
+        NiftiLoadResult result;
+        MultiStructureNiftiLoader loader;
+        result.loaded = loader.load(
+            ctPath,
+            segmentationPath,
+            &result.volume,
+            &result.errorMessage);
+        return result;
+    }));
+}
+
+void CTViewerWidget::rebuildMultiStructureControls()
+{
+    clearMultiStructureControls();
+    if (!m_mask3DViewer || !m_multiStructureControlsLayout) {
+        return;
+    }
+
+    const auto surfaceInfos = m_mask3DViewer->multiStructureSurfaces();
+    int row = 0;
+    for (const Mask3DViewerWidget::MultiStructureSurfaceInfo &info : surfaceInfos) {
+        auto *colorSwatch = new QLabel(m_multiStructureControlsWidget);
+        const QColor color = QColor::fromRgbF(info.color[0], info.color[1], info.color[2]);
+        colorSwatch->setFixedSize(12, 12);
+        colorSwatch->setStyleSheet(
+            QStringLiteral("background-color: %1; border: 1px solid #555;").arg(color.name()));
+
+        MultiStructureControl control;
+        control.labelValue = info.labelValue;
+        control.color = color;
+        control.visibilityCheckBox = new QCheckBox(info.displayName, m_multiStructureControlsWidget);
+        control.visibilityCheckBox->setChecked(info.visible);
+        control.visibilityCheckBox->setToolTip(
+            QStringLiteral("%1 voxels; %2 points; %3 cells; extracted in %4 ms")
+                .arg(info.voxelCount)
+                .arg(info.pointCount)
+                .arg(info.cellCount)
+                .arg(info.extractionMilliseconds));
+        control.opacitySlider = new QSlider(Qt::Horizontal, m_multiStructureControlsWidget);
+        control.opacitySlider->setRange(0, 100);
+        control.opacitySlider->setValue(static_cast<int>(std::lround(info.opacity * 100.0)));
+        control.opacitySlider->setMinimumWidth(80);
+        control.opacitySlider->setToolTip(QStringLiteral("%1 opacity").arg(info.displayName));
+        control.opacityLabel = new QLabel(
+            QStringLiteral("%1%").arg(control.opacitySlider->value()),
+            m_multiStructureControlsWidget);
+        control.opacityLabel->setMinimumWidth(36);
+        control.opacityLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        connect(control.visibilityCheckBox, &QCheckBox::toggled, this,
+                [this, labelValue = info.labelValue](bool visible) {
+                    if (m_mask3DViewer) {
+                        m_mask3DViewer->setMultiStructureVisible(labelValue, visible);
+                    }
+                    if (m_multiStructurePreviewUiActive) {
+                        for (ViewOrientation orientation :
+                             {ViewOrientation::Axial,
+                              ViewOrientation::Coronal,
+                              ViewOrientation::Sagittal}) {
+                            updateMaskLayers(orientation);
+                        }
+                    }
+                });
+        connect(control.opacitySlider, &QSlider::valueChanged, this,
+                [this, labelValue = info.labelValue, label = control.opacityLabel](int value) {
+                    label->setText(QStringLiteral("%1%").arg(value));
+                    if (m_mask3DViewer) {
+                        m_mask3DViewer->setMultiStructureOpacity(labelValue, value / 100.0);
+                    }
+                    if (m_multiStructurePreviewUiActive) {
+                        for (ViewOrientation orientation :
+                             {ViewOrientation::Axial,
+                              ViewOrientation::Coronal,
+                              ViewOrientation::Sagittal}) {
+                            updateMaskLayers(orientation);
+                        }
+                    }
+                });
+
+        m_multiStructureControlsLayout->addWidget(colorSwatch, row, 0);
+        m_multiStructureControlsLayout->addWidget(control.visibilityCheckBox, row, 1);
+        m_multiStructureControlsLayout->addWidget(control.opacitySlider, row, 2);
+        m_multiStructureControlsLayout->addWidget(control.opacityLabel, row, 3);
+        m_multiStructureControls.push_back(control);
+        ++row;
+    }
+    m_multiStructureControlsLayout->setColumnStretch(2, 1);
+}
+
+void CTViewerWidget::clearMultiStructureControls()
+{
+    m_multiStructureControls.clear();
+    if (!m_multiStructureControlsLayout) {
+        return;
+    }
+    while (QLayoutItem *item = m_multiStructureControlsLayout->takeAt(0)) {
+        if (QWidget *widget = item->widget()) {
+            delete widget;
+        }
+        delete item;
+    }
+}
+
+void CTViewerWidget::setMultiStructurePreviewUiActive(bool active)
+{
+    const bool wasActive = m_multiStructurePreviewUiActive;
+    if (active && !wasActive) {
+        m_toolModeBeforeMultiStructure = m_toolMode;
+        m_move3DPlanesWasCheckedBeforeMultiStructure =
+            m_move3DPlanesCheckBox && m_move3DPlanesCheckBox->isChecked();
+        m_planeVisibilityBeforeMultiStructure = {
+            m_showSagittal3DPlaneCheckBox
+                && m_showSagittal3DPlaneCheckBox->isChecked(),
+            m_showCoronal3DPlaneCheckBox
+                && m_showCoronal3DPlaneCheckBox->isChecked(),
+            m_showAxial3DPlaneCheckBox
+                && m_showAxial3DPlaneCheckBox->isChecked()
+        };
+    }
+    m_multiStructurePreviewUiActive = active;
+    if (active) {
+        m_toolMode = ToolMode::ViewPan;
+        if (m_viewPanButton) {
+            m_viewPanButton->setChecked(true);
+        }
+        // A NIfTI review starts with all three native dev cards visible.
+        // Their previous normal-CAC visibility is restored on exit.
+        for (QCheckBox *planeCheckBox : {m_showAxial3DPlaneCheckBox,
+                                         m_showCoronal3DPlaneCheckBox,
+                                         m_showSagittal3DPlaneCheckBox}) {
+            if (planeCheckBox) {
+                planeCheckBox->setChecked(true);
+            }
+        }
+    }
+    if (m_multiStructureControlsWidget) {
+        m_multiStructureControlsWidget->setVisible(active);
+    }
+    if (m_multiStructureStatusLabel) {
+        m_multiStructureStatusLabel->setVisible(active);
+        if (!active) {
+            m_multiStructureStatusLabel->clear();
+        }
+    }
+    if (m_3DSurfaceOpacitySlider) {
+        m_3DSurfaceOpacitySlider->setEnabled(!active);
+    }
+    if (m_3DSurfaceOpacityLabel) {
+        m_3DSurfaceOpacityLabel->setEnabled(!active);
+    }
+    for (QCheckBox *planeCheckBox : {m_showAxial3DPlaneCheckBox,
+                                     m_showCoronal3DPlaneCheckBox,
+                                     m_showSagittal3DPlaneCheckBox,
+                                     m_move3DPlanesCheckBox}) {
+        if (planeCheckBox) {
+            planeCheckBox->setEnabled(true);
+        }
+    }
+    if (m_showAiMaskCheckBox) {
+        m_showAiMaskCheckBox->setEnabled(!active);
+    }
+    if (m_showWorkingMaskCheckBox) {
+        m_showWorkingMaskCheckBox->setEnabled(!active);
+    }
+    if (m_maskStatusLabel) {
+        m_maskStatusLabel->setVisible(!active);
+    }
+    for (QPushButton *editButton : {m_brushAddButton,
+                                    m_brushEraseButton,
+                                    m_undoButton,
+                                    m_redoButton,
+                                    m_saveMaskButton}) {
+        if (editButton) {
+            editButton->setEnabled(!active);
+        }
+    }
+    if (m_brushRadiusSpinBox) {
+        m_brushRadiusSpinBox->setEnabled(!active);
+    }
+    if (m_refresh3DButton) {
+        m_refresh3DButton->setToolTip(active
+            ? QStringLiteral("Return to the current CAC working-mask surface")
+            : QStringLiteral("Rebuild 3D mask surface from current working mask"));
+    }
+    if (!active && wasActive) {
+        m_toolMode = m_toolModeBeforeMultiStructure;
+        switch (m_toolMode) {
+        case ToolMode::ViewPan:
+            if (m_viewPanButton) {
+                m_viewPanButton->setChecked(true);
+            }
+            break;
+        case ToolMode::BrushAdd:
+            if (m_brushAddButton) {
+                m_brushAddButton->setChecked(true);
+            }
+            break;
+        case ToolMode::BrushErase:
+            if (m_brushEraseButton) {
+                m_brushEraseButton->setChecked(true);
+            }
+            break;
+        }
+        if (m_move3DPlanesCheckBox) {
+            m_move3DPlanesCheckBox->setChecked(
+                m_move3DPlanesWasCheckedBeforeMultiStructure);
+        }
+        const std::array<QCheckBox *, 3> planeCheckBoxes = {
+            m_showSagittal3DPlaneCheckBox,
+            m_showCoronal3DPlaneCheckBox,
+            m_showAxial3DPlaneCheckBox
+        };
+        for (size_t axis = 0; axis < planeCheckBoxes.size(); ++axis) {
+            if (planeCheckBoxes[axis]) {
+                planeCheckBoxes[axis]->setChecked(
+                    m_planeVisibilityBeforeMultiStructure[axis]);
+            }
+        }
+    }
+    updateToolState();
+    if (active != wasActive) {
+        emit niftiReviewModeChanged(active);
+    }
+}
+
+void CTViewerWidget::configureNiftiReviewMpr()
+{
+    if (!m_multiStructurePreviewUiActive || !m_niftiReviewVolume.isValid()) {
+        return;
+    }
+
+    const auto dimensions = displayVolumeDimensions();
+    panel(ViewOrientation::Sagittal).sliceIndex = dimensions[0] / 2;
+    panel(ViewOrientation::Coronal).sliceIndex = dimensions[1] / 2;
+    panel(ViewOrientation::Axial).sliceIndex = dimensions[2] / 2;
+
+    updateAllSceneRects();
+    for (ViewOrientation orientation : {ViewOrientation::Axial,
+                                        ViewOrientation::Coronal,
+                                        ViewOrientation::Sagittal}) {
+        ViewPanel &viewPanel = panel(orientation);
+        const int count = sliceCount(orientation);
+        viewPanel.sliceIndex = std::clamp(viewPanel.sliceIndex, 0, std::max(0, count - 1));
+        QSignalBlocker blocker(viewPanel.sliceSlider);
+        viewPanel.sliceSlider->setRange(0, std::max(0, count - 1));
+        viewPanel.sliceSlider->setValue(viewPanel.sliceIndex);
+    }
+    updateSliceImages();
+    updateSliceLabel();
+    updateAllFitScales();
+    configure3DPositionPlanes();
+}
+
+void CTViewerWidget::leaveNiftiReviewMode()
+{
+    if (!m_multiStructurePreviewUiActive) {
+        return;
+    }
+
+    finishBrushStroke();
+    hideBrushCursor();
+    if (m_mask3DViewer) {
+        m_mask3DViewer->clearMultiStructurePreview();
+    }
+    m_niftiReviewVolume = {};
+    clearMultiStructureControls();
+    setMultiStructurePreviewUiActive(false);
+
+    panel(ViewOrientation::Sagittal).sliceIndex = m_normalSliceIndicesBeforeNifti[0];
+    panel(ViewOrientation::Coronal).sliceIndex = m_normalSliceIndicesBeforeNifti[1];
+    panel(ViewOrientation::Axial).sliceIndex = m_normalSliceIndicesBeforeNifti[2];
+    updateAllSceneRects();
+    for (ViewOrientation orientation : {ViewOrientation::Axial,
+                                        ViewOrientation::Coronal,
+                                        ViewOrientation::Sagittal}) {
+        ViewPanel &viewPanel = panel(orientation);
+        const int count = sliceCount(orientation);
+        viewPanel.sliceIndex = std::clamp(viewPanel.sliceIndex, 0, std::max(0, count - 1));
+        QSignalBlocker blocker(viewPanel.sliceSlider);
+        viewPanel.sliceSlider->setRange(0, std::max(0, count - 1));
+        viewPanel.sliceSlider->setValue(viewPanel.sliceIndex);
+    }
+    updateSliceImages();
+    updateSliceLabel();
+    updateAllFitScales();
+    configure3DPositionPlanes();
+    if (m_mask3DViewer) {
+        bool restoredNormalSurface = false;
+        if (m_hasWorkingMask && m_workingMask.isValid()) {
+            m_mask3DViewer->refreshFromMask(m_workingMask);
+            restoredNormalSurface = true;
+        } else if (m_hasMask && m_aiMask.isValid()) {
+            m_mask3DViewer->refreshFromMask(m_aiMask);
+            restoredNormalSurface = true;
+        } else {
+            m_mask3DViewer->clear();
+        }
+        if (restoredNormalSurface) {
+            m_mask3DViewer->resetCamera();
+        }
+    }
+    updateToolState();
+    updateMaskStatusLabel();
 }
 
 void CTViewerWidget::refresh3DMaskIntersections(const EditOperation &operation)
@@ -1089,7 +1642,7 @@ void CTViewerWidget::handleViewWheel(ViewOrientation orientation, QWheelEvent *e
 void CTViewerWidget::handleViewResized(ViewOrientation orientation)
 {
     ViewPanel &viewPanel = panel(orientation);
-    if (!viewPanel.view || !m_volume.isValid()) {
+    if (!viewPanel.view || !displayVolumeValid()) {
         return;
     }
     const QPointF center = viewPanel.view->mapToScene(viewPanel.view->viewport()->rect().center());
@@ -1100,6 +1653,9 @@ void CTViewerWidget::setVolumeAndMask(const VolumeData &volume, const MaskVolume
 {
     if (!volume.isValid()) {
         return;
+    }
+    if (m_multiStructurePreviewUiActive) {
+        leaveNiftiReviewMode();
     }
 
     m_volume = volume;
@@ -1165,7 +1721,7 @@ void CTViewerWidget::updateSliceImages()
 
 void CTViewerWidget::updateSliceImages(ViewOrientation orientation)
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return;
     }
 
@@ -1181,12 +1737,24 @@ void CTViewerWidget::updateSliceImages(ViewOrientation orientation)
 
 void CTViewerWidget::updateMaskLayers(ViewOrientation orientation)
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return;
     }
 
     ViewPanel &viewPanel = panel(orientation);
     if (!viewPanel.scene) {
+        return;
+    }
+
+    if (m_multiStructurePreviewUiActive) {
+        viewPanel.aiMaskLayer->setVisible(true);
+        viewPanel.aiMaskLayer->setPixmap(
+            QPixmap::fromImage(renderNiftiCategoricalOverlay(
+                orientation, viewPanel.sliceIndex)));
+        viewPanel.workingMaskLayer->setVisible(false);
+        viewPanel.workingMaskLayer->setPixmap(QPixmap());
+        viewPanel.scene->update(viewPanel.scene->sceneRect());
+        viewPanel.view->viewport()->update();
         return;
     }
 
@@ -1232,7 +1800,7 @@ void CTViewerWidget::updateSliceLabel()
 void CTViewerWidget::updateSliceLabel(ViewOrientation orientation)
 {
     ViewPanel &viewPanel = panel(orientation);
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         viewPanel.sliceLabel->setText(QStringLiteral("%1 - / -").arg(orientationName(orientation)));
         return;
     }
@@ -1271,9 +1839,83 @@ QImage CTViewerWidget::renderCtSlice(ViewOrientation orientation, int sliceIndex
     return image;
 }
 
+QImage CTViewerWidget::renderNiftiCategoricalOverlay(
+    ViewOrientation orientation,
+    int sliceIndex) const
+{
+    const MprSliceGeometry geometry = mprGeometry(orientation);
+    QImage image(geometry.imageSize, QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    if (!m_multiStructurePreviewUiActive
+        || !m_niftiReviewVolume.isValid()
+        || geometry.imageSize.isEmpty()) {
+        return image;
+    }
+
+    struct VisibleLabelStyle
+    {
+        int value = 0;
+        QRgb color = 0;
+    };
+    std::vector<VisibleLabelStyle> visibleLabels;
+    visibleLabels.reserve(m_multiStructureControls.size());
+    for (const MultiStructureControl &control : m_multiStructureControls) {
+        if (!control.visibilityCheckBox
+            || !control.visibilityCheckBox->isChecked()
+            || !control.opacitySlider
+            || control.opacitySlider->value() <= 0) {
+            continue;
+        }
+        QColor color = control.color;
+        color.setAlphaF(std::clamp(control.opacitySlider->value() / 100.0,
+                                   0.0,
+                                   1.0));
+        visibleLabels.push_back({control.labelValue, color.rgba()});
+    }
+    if (visibleLabels.empty()) {
+        return image;
+    }
+
+    for (int v = 0; v < geometry.imageSize.height(); ++v) {
+        auto *line = reinterpret_cast<QRgb *>(image.scanLine(v));
+        for (int u = 0; u < geometry.imageSize.width(); ++u) {
+            const QPointF scenePoint(
+                (static_cast<double>(u) + 0.5)
+                    * geometry.itemScaleMmPerPixel.width(),
+                (static_cast<double>(v) + 0.5)
+                    * geometry.itemScaleMmPerPixel.height());
+            double ctX = 0.0;
+            double ctY = 0.0;
+            double ctZ = 0.0;
+            if (!scenePointToVoxelContinuous(
+                    orientation,
+                    scenePoint,
+                    sliceIndex,
+                    &ctX,
+                    &ctY,
+                    &ctZ)) {
+                continue;
+            }
+            const int labelValue =
+                sampleNiftiCategoricalNearest(ctX, ctY, ctZ);
+            const auto style = std::find_if(
+                visibleLabels.cbegin(),
+                visibleLabels.cend(),
+                [labelValue](const VisibleLabelStyle &candidate) {
+                    return candidate.value == labelValue;
+                });
+            if (style != visibleLabels.cend()) {
+                line[u] = style->color;
+            }
+        }
+    }
+    return image;
+}
+
 void CTViewerWidget::updateToolState()
 {
-    const bool editToolActive = m_toolMode != ToolMode::ViewPan;
+    const bool editToolActive = !m_multiStructurePreviewUiActive
+        && m_toolMode != ToolMode::ViewPan;
     for (ViewPanel &viewPanel : m_viewPanels) {
         if (viewPanel.view) {
             viewPanel.view->setDragMode(editToolActive ? QGraphicsView::NoDrag : QGraphicsView::ScrollHandDrag);
@@ -1288,14 +1930,23 @@ void CTViewerWidget::updateToolState()
         hideBrushCursor();
     }
 
+    if (m_brushAddButton) {
+        m_brushAddButton->setEnabled(!m_multiStructurePreviewUiActive);
+    }
+    if (m_brushEraseButton) {
+        m_brushEraseButton->setEnabled(!m_multiStructurePreviewUiActive);
+    }
+    if (m_brushRadiusSpinBox) {
+        m_brushRadiusSpinBox->setEnabled(!m_multiStructurePreviewUiActive);
+    }
     if (m_undoButton) {
-        m_undoButton->setEnabled(!m_undoStack.empty());
+        m_undoButton->setEnabled(!m_multiStructurePreviewUiActive && !m_undoStack.empty());
     }
     if (m_redoButton) {
-        m_redoButton->setEnabled(!m_redoStack.empty());
+        m_redoButton->setEnabled(!m_multiStructurePreviewUiActive && !m_redoStack.empty());
     }
     if (m_saveMaskButton) {
-        m_saveMaskButton->setEnabled(m_hasWorkingMask);
+        m_saveMaskButton->setEnabled(!m_multiStructurePreviewUiActive && m_hasWorkingMask);
     }
 }
 
@@ -1370,6 +2021,9 @@ void CTViewerWidget::hideBrushCursor()
 
 void CTViewerWidget::ensureWorkingMask()
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     if (m_hasWorkingMask || !m_hasMask || !m_aiMask.hasSameDimensionsAs(m_volume)) {
         return;
     }
@@ -1413,10 +2067,11 @@ bool CTViewerWidget::scenePointToVoxel(ViewOrientation orientation, const QPoint
 
 bool CTViewerWidget::scenePointToVoxelContinuous(ViewOrientation orientation, const QPointF &scenePos, int sliceIndex, double *x, double *y, double *z) const
 {
-    if (!m_volume.isValid()) {
+    if (!displayVolumeValid()) {
         return false;
     }
 
+    const auto dimensions = displayVolumeDimensions();
     const double spacingX = volumeSpacing(0);
     const double spacingY = volumeSpacing(1);
     const double spacingZ = volumeSpacing(2);
@@ -1424,15 +2079,15 @@ bool CTViewerWidget::scenePointToVoxelContinuous(ViewOrientation orientation, co
     case ViewOrientation::Axial:
         *x = scenePos.x() / spacingX - 0.5;
         *y = scenePos.y() / spacingY - 0.5;
-        *z = static_cast<double>(std::clamp(sliceIndex, 0, m_volume.depth - 1));
+        *z = static_cast<double>(std::clamp(sliceIndex, 0, dimensions[2] - 1));
         break;
     case ViewOrientation::Coronal:
         *x = scenePos.x() / spacingX - 0.5;
-        *y = static_cast<double>(std::clamp(sliceIndex, 0, m_volume.height - 1));
+        *y = static_cast<double>(std::clamp(sliceIndex, 0, dimensions[1] - 1));
         *z = scenePos.y() / spacingZ - 0.5;
         break;
     case ViewOrientation::Sagittal:
-        *x = static_cast<double>(std::clamp(sliceIndex, 0, m_volume.width - 1));
+        *x = static_cast<double>(std::clamp(sliceIndex, 0, dimensions[0] - 1));
         *y = scenePos.x() / spacingY - 0.5;
         *z = scenePos.y() / spacingZ - 0.5;
         break;
@@ -1469,28 +2124,38 @@ bool CTViewerWidget::slicePointToVoxel(ViewOrientation orientation, int u, int v
         && *z >= 0 && *z < m_volume.depth;
 }
 
-int16_t CTViewerWidget::sampleCtLinear(double x, double y, double z) const
+double CTViewerWidget::sampleCtLinear(double x, double y, double z) const
 {
-    if (!m_volume.isValid()) {
-        return 0;
+    if (!displayVolumeValid()) {
+        return 0.0;
     }
 
-    x = std::clamp(x, 0.0, static_cast<double>(m_volume.width - 1));
-    y = std::clamp(y, 0.0, static_cast<double>(m_volume.height - 1));
-    z = std::clamp(z, 0.0, static_cast<double>(m_volume.depth - 1));
+    const auto dimensions = displayVolumeDimensions();
+    x = std::clamp(x, 0.0, static_cast<double>(dimensions[0] - 1));
+    y = std::clamp(y, 0.0, static_cast<double>(dimensions[1] - 1));
+    z = std::clamp(z, 0.0, static_cast<double>(dimensions[2] - 1));
+
+    const int nearestX = static_cast<int>(std::lround(x));
+    const int nearestY = static_cast<int>(std::lround(y));
+    const int nearestZ = static_cast<int>(std::lround(z));
+    if (std::abs(x - nearestX) < 1e-9
+        && std::abs(y - nearestY) < 1e-9
+        && std::abs(z - nearestZ) < 1e-9) {
+        return displayCtValue(nearestX, nearestY, nearestZ);
+    }
 
     const int x0 = static_cast<int>(std::floor(x));
     const int y0 = static_cast<int>(std::floor(y));
     const int z0 = static_cast<int>(std::floor(z));
-    const int x1 = std::min(x0 + 1, m_volume.width - 1);
-    const int y1 = std::min(y0 + 1, m_volume.height - 1);
-    const int z1 = std::min(z0 + 1, m_volume.depth - 1);
+    const int x1 = std::min(x0 + 1, dimensions[0] - 1);
+    const int y1 = std::min(y0 + 1, dimensions[1] - 1);
+    const int z1 = std::min(z0 + 1, dimensions[2] - 1);
     const double tx = x - x0;
     const double ty = y - y0;
     const double tz = z - z0;
 
     const auto value = [this](int vx, int vy, int vz) {
-        return static_cast<double>(m_volume.value(vx, vy, vz));
+        return displayCtValue(vx, vy, vz);
     };
     const double c00 = value(x0, y0, z0) * (1.0 - tx) + value(x1, y0, z0) * tx;
     const double c10 = value(x0, y1, z0) * (1.0 - tx) + value(x1, y1, z0) * tx;
@@ -1498,7 +2163,59 @@ int16_t CTViewerWidget::sampleCtLinear(double x, double y, double z) const
     const double c11 = value(x0, y1, z1) * (1.0 - tx) + value(x1, y1, z1) * tx;
     const double c0 = c00 * (1.0 - ty) + c10 * ty;
     const double c1 = c01 * (1.0 - ty) + c11 * ty;
-    return static_cast<int16_t>(std::lround(c0 * (1.0 - tz) + c1 * tz));
+    return c0 * (1.0 - tz) + c1 * tz;
+}
+
+int CTViewerWidget::sampleNiftiCategoricalNearest(
+    double ctX,
+    double ctY,
+    double ctZ) const
+{
+    if (!m_multiStructurePreviewUiActive
+        || !m_niftiReviewVolume.isValid()
+        || !m_niftiReviewVolume.segmentationImage
+        || !m_niftiReviewVolume.ctIndexToSegmentationIndex) {
+        return 0;
+    }
+
+    const double ctIndex[4] = {ctX, ctY, ctZ, 1.0};
+    double segmentationIndex[4] = {};
+    m_niftiReviewVolume.ctIndexToSegmentationIndex->MultiplyPoint(
+        ctIndex, segmentationIndex);
+    double homogeneousScale = segmentationIndex[3];
+    if (!std::isfinite(homogeneousScale)
+        || std::abs(homogeneousScale) < 1e-12) {
+        return 0;
+    }
+    const double segmentationX = segmentationIndex[0] / homogeneousScale;
+    const double segmentationY = segmentationIndex[1] / homogeneousScale;
+    const double segmentationZ = segmentationIndex[2] / homogeneousScale;
+    if (!std::isfinite(segmentationX)
+        || !std::isfinite(segmentationY)
+        || !std::isfinite(segmentationZ)) {
+        return 0;
+    }
+
+    const auto dimensions =
+        m_niftiReviewVolume.segmentationGeometry.dimensions;
+    const int x = static_cast<int>(std::lround(segmentationX));
+    const int y = static_cast<int>(std::lround(segmentationY));
+    const int z = static_cast<int>(std::lround(segmentationZ));
+    if (x < 0 || y < 0 || z < 0
+        || x >= dimensions[0]
+        || y >= dimensions[1]
+        || z >= dimensions[2]) {
+        return 0;
+    }
+    const double value =
+        m_niftiReviewVolume.segmentationImage
+            ->GetScalarComponentAsDouble(x, y, z, 0);
+    if (!std::isfinite(value)
+        || value < static_cast<double>(std::numeric_limits<int>::min())
+        || value > static_cast<double>(std::numeric_limits<int>::max())) {
+        return 0;
+    }
+    return static_cast<int>(std::lround(value));
 }
 
 uint8_t CTViewerWidget::sampleMaskNearest(const MaskVolume &mask, double x, double y, double z) const
@@ -1515,12 +2232,18 @@ uint8_t CTViewerWidget::sampleMaskNearest(const MaskVolume &mask, double x, doub
 
 void CTViewerWidget::applyBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos)
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     beginBrushStroke(orientation, scenePos);
     finishBrushStroke();
 }
 
 void CTViewerWidget::beginBrushStroke(ViewOrientation orientation, const QPointF &scenePos)
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     ensureWorkingMask();
     if (!m_hasWorkingMask || !m_workingMask.hasSameDimensionsAs(m_volume)) {
         return;
@@ -1556,6 +2279,9 @@ void CTViewerWidget::beginBrushStroke(ViewOrientation orientation, const QPointF
 
 void CTViewerWidget::continueBrushStroke(ViewOrientation orientation, const QPointF &scenePos)
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     if (!m_isBrushDragging || !m_hasLastBrushPoint) {
         beginBrushStroke(orientation, scenePos);
         return;
@@ -1649,6 +2375,9 @@ void CTViewerWidget::resetActiveBrushStroke()
 
 bool CTViewerWidget::stampBrushAtScenePoint(ViewOrientation orientation, const QPointF &scenePos)
 {
+    if (m_multiStructurePreviewUiActive) {
+        return false;
+    }
     if (!m_hasWorkingMask || !m_workingMask.hasSameDimensionsAs(m_volume)) {
         return false;
     }
@@ -1815,6 +2544,9 @@ void CTViewerWidget::mergeActiveBrushChange(const PixelChange &change)
 
 void CTViewerWidget::applyEditOperation(const EditOperation &operation, bool useNewValues)
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     if (!m_hasWorkingMask || !m_workingMask.isValid()) {
         return;
     }
@@ -1834,6 +2566,9 @@ void CTViewerWidget::applyEditOperation(const EditOperation &operation, bool use
 
 void CTViewerWidget::undoLastEdit()
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     if (m_undoStack.empty()) {
         return;
     }
@@ -1846,6 +2581,9 @@ void CTViewerWidget::undoLastEdit()
 
 void CTViewerWidget::redoLastEdit()
 {
+    if (m_multiStructurePreviewUiActive) {
+        return;
+    }
     if (m_redoStack.empty()) {
         return;
     }
@@ -1950,6 +2688,10 @@ void CTViewerWidget::updateMaskStatusLabel()
 
 bool CTViewerWidget::saveCorrectedMask()
 {
+    if (m_multiStructurePreviewUiActive) {
+        qWarning() << "Corrected-mask saving is disabled during NIfTI read-only review.";
+        return false;
+    }
     if (!m_hasWorkingMask || !m_workingMask.isValid()) {
         qWarning() << "No working mask is available to save.";
         return false;

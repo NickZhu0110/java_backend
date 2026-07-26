@@ -3,6 +3,7 @@ project(qt-cac-app LANGUAGES CXX)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS
     Core
+    Concurrent
     Widgets
     OpenGLWidgets
     Network
@@ -16,6 +17,8 @@ find_package(VTK REQUIRED COMPONENTS
     FiltersGeneral
     FiltersSources
     GUISupportQt
+    ImagingCore
+    IOImage
     InteractionStyle
     InteractionWidgets
     RenderingAnnotation
@@ -51,6 +54,9 @@ qt_add_executable(qt-cac-app
     src/viewer/LoadedCaseVolume.h
     src/viewer/Mask3DViewerWidget.cpp
     src/viewer/Mask3DViewerWidget.h
+    src/viewer/MultiStructureNiftiLoader.cpp
+    src/viewer/MultiStructureNiftiLoader.h
+    src/viewer/MultiStructureVolume.h
     src/viewer/PythonSimpleItkPreprocessor.cpp
     src/viewer/PythonSimpleItkPreprocessor.h
     src/viewer/RawVolumeLoader.cpp
@@ -65,6 +71,7 @@ target_include_directories(qt-cac-app
 target_link_libraries(qt-cac-app
     PRIVATE
         Qt::Core
+        Qt::Concurrent
         Qt::Widgets
         Qt::OpenGLWidgets
         Qt::Network

@@ -1,6 +1,8 @@
 #include "viewer/Mask3DViewerWidget.h"
+#include "viewer/MultiStructureNiftiLoader.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QMouseEvent>
 #include <QSizePolicy>
@@ -16,10 +18,13 @@
 #include <vtkCellArray.h>
 #include <vtkCellPicker.h>
 #include <vtkCommand.h>
+#include <vtkDiscreteFlyingEdges3D.h>
 #include <vtkDiscreteMarchingCubes.h>
+#include <vtkExtractVOI.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkImageData.h>
 #include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkOrientationMarkerWidget.h>
@@ -35,6 +40,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 class StrictTrackballCameraStyle final : public vtkInteractorStyleTrackballCamera
 {
@@ -395,6 +402,15 @@ void Mask3DViewerWidget::updateOrientationLabels(const MaskVolume &mask)
             << "+Z=" << plusLabels[2] << "-Z=" << minusLabels[2];
 }
 
+void Mask3DViewerWidget::updateOrientationLabelsForRasWorld()
+{
+    static constexpr const char *plusLabels[3] = {"R", "A", "S"};
+    static constexpr const char *minusLabels[3] = {"L", "P", "I"};
+    setOrientationLabels(plusLabels, minusLabels);
+    qInfo() << "Verified NIfTI preview orientation labels in RAS world coordinates."
+            << "+X=R -X=L +Y=A -Y=P +Z=S -Z=I";
+}
+
 void Mask3DViewerWidget::clearVolumeBoundsGuide()
 {
     if (m_boundsActor) {
@@ -575,7 +591,8 @@ void Mask3DViewerWidget::updatePlanePickerList()
 bool Mask3DViewerWidget::beginPlaneDrag(const QPointF &widgetPosition)
 {
     if (!m_movePlanesEnabled || !m_hasVolumeGeometry || !m_volumeMaskGeometryAligned
-        || !m_hasSurfaceFrameBounds || !m_planePicker || !m_renderer) {
+        || (!m_niftiReviewGeometryActive && !m_hasSurfaceFrameBounds)
+        || !m_planePicker || !m_renderer) {
         return false;
     }
 
@@ -926,6 +943,11 @@ void Mask3DViewerWidget::forceEndInteraction()
 
 void Mask3DViewerWidget::clear()
 {
+    const bool clearingNiftiReview = m_multiStructurePreviewActive;
+    removeMultiStructurePreview(false);
+    if (clearingNiftiReview) {
+        clearVolumeGeometry();
+    }
     if (m_maskActor) {
         m_renderer->RemoveActor(m_maskActor);
         m_maskActor = nullptr;
@@ -947,19 +969,33 @@ void Mask3DViewerWidget::resetCamera()
         qWarning() << "Reset 3D camera skipped: renderer/render window missing.";
         return;
     }
-    if (!m_maskActor || !m_maskActor->GetVisibility()) {
-        qWarning() << "Reset 3D camera skipped: no visible mask actor.";
-        return;
-    }
 
     double bounds[6];
-    m_maskActor->GetBounds(bounds);
+    const double *frameBounds = nullptr;
+    if (m_multiStructurePreviewActive) {
+        const auto &ctBounds =
+            m_multiStructureVolume.ctGeometry.physicalBoundsRasMm;
+        std::copy(ctBounds.cbegin(), ctBounds.cend(), bounds);
+        if (!boundsAreValid(bounds)) {
+            if (!visibleMultiStructureBounds(bounds)) {
+                qWarning()
+                    << "Reset 3D camera skipped: NIfTI CT bounds are invalid.";
+                return;
+            }
+        }
+        frameBounds = bounds;
+    } else {
+        if (!m_maskActor || !m_maskActor->GetVisibility()) {
+            qWarning() << "Reset 3D camera skipped: no visible mask actor.";
+            return;
+        }
+        m_maskActor->GetBounds(bounds);
+        frameBounds = m_hasSurfaceFrameBounds ? m_surfaceFrameBounds : bounds;
+    }
     if (!boundsAreValid(bounds)) {
-        qWarning() << "Reset 3D camera skipped: mask actor bounds are invalid.";
+        qWarning() << "Reset 3D camera skipped: actor bounds are invalid.";
         return;
     }
-
-    const double *frameBounds = m_hasSurfaceFrameBounds ? m_surfaceFrameBounds : bounds;
 
     vtkCamera *camera = renderer->GetActiveCamera();
     if (!camera) {
@@ -1025,57 +1061,13 @@ void Mask3DViewerWidget::clearVolumeGeometry()
     }
     m_hasVolumeGeometry = false;
     m_volumeMaskGeometryAligned = false;
+    m_niftiReviewGeometryActive = false;
 }
 
-void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
+void Mask3DViewerWidget::createPositionPlaneActors()
 {
-    // A newly configured case must not briefly reuse intersection voxels retained
-    // from the previous case before its working mask is supplied.
-    m_intersectionMask = {};
-    m_hasIntersectionMask = false;
-
-    const bool dimensionsValid = volume.isValid();
-    const bool geometryArraysValid = volume.spacing.size() == 3
-        && volume.origin.size() == 3 && volume.direction.size() == 9;
-    bool geometryValuesValid = geometryArraysValid;
-    if (geometryValuesValid) {
-        for (int axis = 0; axis < 3; ++axis) {
-            geometryValuesValid = geometryValuesValid
-                && std::isfinite(volume.spacing[static_cast<size_t>(axis)])
-                && volume.spacing[static_cast<size_t>(axis)] > 0.0
-                && std::isfinite(volume.origin[static_cast<size_t>(axis)]);
-        }
-        geometryValuesValid = geometryValuesValid
-            && std::all_of(volume.direction.cbegin(), volume.direction.cend(), [](double value) {
-                   return std::isfinite(value);
-               });
-    }
-
-    // The existing CAC marching-cubes actor is axis-aligned. Until that pipeline
-    // supports direction matrices, rendering an oblique plane would imply a false
-    // alignment, so keep position indicators disabled for non-identity direction.
-    if (!dimensionsValid || !geometryValuesValid || !directionIsIdentity(volume.direction)) {
-        clearVolumeGeometry();
-        qWarning() << "3D position planes disabled: invalid geometry or a direction matrix"
-                      " not supported by the existing CAC surface pipeline.";
-        m_renderWindow->Render();
-        return;
-    }
-
-    clearVolumeGeometry();
-    m_volumeDimensions = {volume.width, volume.height, volume.depth};
-    for (int axis = 0; axis < 3; ++axis) {
-        m_volumeSpacing[static_cast<size_t>(axis)] = volume.spacing[static_cast<size_t>(axis)];
-        m_volumeOrigin[static_cast<size_t>(axis)] = volume.origin[static_cast<size_t>(axis)];
-        const int maximum = std::max(0, m_volumeDimensions[static_cast<size_t>(axis)] - 1);
-        m_positionPlaneSlices[static_cast<size_t>(axis)] = std::clamp(
-            m_positionPlaneSlices[static_cast<size_t>(axis)], 0, maximum);
-    }
-    std::copy(volume.direction.cbegin(), volume.direction.cend(), m_volumeDirection.begin());
-    m_hasVolumeGeometry = true;
-    m_volumeMaskGeometryAligned = false;
-
-    // Axis order is X/Sagittal, Y/Coronal, Z/Axial.
+    // This is the shared dev card implementation. Axis order is
+    // X/Sagittal, Y/Coronal, Z/Axial.
     static constexpr double fillOpacity[3] = {0.28, 0.26, 0.28};
     static constexpr double intersectionColors[3][3] = {
         {1.00, 0.84, 0.98},
@@ -1180,11 +1172,161 @@ void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
     updateAllPositionPlaneGeometry();
     updatePositionPlaneVisibility();
     m_renderWindow->Render();
+}
+
+void Mask3DViewerWidget::setVolumeGeometry(const VolumeData &volume)
+{
+    // A newly configured case must not briefly reuse intersection voxels retained
+    // from the previous case before its working mask is supplied.
+    m_intersectionMask = {};
+    m_hasIntersectionMask = false;
+
+    const bool dimensionsValid = volume.isValid();
+    const bool geometryArraysValid = volume.spacing.size() == 3
+        && volume.origin.size() == 3 && volume.direction.size() == 9;
+    bool geometryValuesValid = geometryArraysValid;
+    if (geometryValuesValid) {
+        for (int axis = 0; axis < 3; ++axis) {
+            geometryValuesValid = geometryValuesValid
+                && std::isfinite(volume.spacing[static_cast<size_t>(axis)])
+                && volume.spacing[static_cast<size_t>(axis)] > 0.0
+                && std::isfinite(volume.origin[static_cast<size_t>(axis)]);
+        }
+        geometryValuesValid = geometryValuesValid
+            && std::all_of(volume.direction.cbegin(), volume.direction.cend(), [](double value) {
+                   return std::isfinite(value);
+               });
+    }
+
+    // The existing CAC marching-cubes actor is axis-aligned. Until that pipeline
+    // supports direction matrices, rendering an oblique plane would imply a false
+    // alignment, so keep position indicators disabled for non-identity direction.
+    if (!dimensionsValid || !geometryValuesValid || !directionIsIdentity(volume.direction)) {
+        clearVolumeGeometry();
+        qWarning() << "3D position planes disabled: invalid geometry or a direction matrix"
+                      " not supported by the existing CAC surface pipeline.";
+        m_renderWindow->Render();
+        return;
+    }
+
+    clearVolumeGeometry();
+    m_volumeDimensions = {volume.width, volume.height, volume.depth};
+    for (int axis = 0; axis < 3; ++axis) {
+        m_volumeSpacing[static_cast<size_t>(axis)] = volume.spacing[static_cast<size_t>(axis)];
+        m_volumeOrigin[static_cast<size_t>(axis)] = volume.origin[static_cast<size_t>(axis)];
+        const int maximum = std::max(0, m_volumeDimensions[static_cast<size_t>(axis)] - 1);
+        m_positionPlaneSlices[static_cast<size_t>(axis)] = std::clamp(
+            m_positionPlaneSlices[static_cast<size_t>(axis)], 0, maximum);
+    }
+    std::copy(volume.direction.cbegin(), volume.direction.cend(), m_volumeDirection.begin());
+    m_hasVolumeGeometry = true;
+    m_volumeMaskGeometryAligned = false;
+
+    createPositionPlaneActors();
 
     qInfo() << "Configured solid-color 3D position planes"
             << volume.width << "x" << volume.height << "x" << volume.depth
             << "spacing=" << m_volumeSpacing[0] << m_volumeSpacing[1] << m_volumeSpacing[2]
             << "origin=" << m_volumeOrigin[0] << m_volumeOrigin[1] << m_volumeOrigin[2];
+}
+
+bool Mask3DViewerWidget::setNiftiReviewVolumeGeometry(
+    const NiftiVolumeGeometry &geometry,
+    QString *errorMessage)
+{
+    if (!geometry.indexToWorldRas
+        || geometry.dimensions[0] <= 0
+        || geometry.dimensions[1] <= 0
+        || geometry.dimensions[2] <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("NIfTI CT geometry is incomplete.");
+        }
+        return false;
+    }
+
+    std::array<double, 3> spacing = {0.0, 0.0, 0.0};
+    std::array<double, 9> direction = {};
+    for (int column = 0; column < 3; ++column) {
+        double lengthSquared = 0.0;
+        for (int row = 0; row < 3; ++row) {
+            const double value = geometry.indexToWorldRas->GetElement(row, column);
+            if (!std::isfinite(value)) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("NIfTI CT affine contains a non-finite value.");
+                }
+                return false;
+            }
+            lengthSquared += value * value;
+        }
+        spacing[static_cast<size_t>(column)] = std::sqrt(lengthSquared);
+        if (!std::isfinite(spacing[static_cast<size_t>(column)])
+            || spacing[static_cast<size_t>(column)] <= kGeometryTolerance) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("NIfTI CT affine has a degenerate axis.");
+            }
+            return false;
+        }
+        for (int row = 0; row < 3; ++row) {
+            direction[static_cast<size_t>(row * 3 + column)] =
+                geometry.indexToWorldRas->GetElement(row, column)
+                / spacing[static_cast<size_t>(column)];
+        }
+    }
+
+    for (int left = 0; left < 3; ++left) {
+        for (int right = left + 1; right < 3; ++right) {
+            double dot = 0.0;
+            for (int row = 0; row < 3; ++row) {
+                dot += direction[static_cast<size_t>(row * 3 + left)]
+                    * direction[static_cast<size_t>(row * 3 + right)];
+            }
+            if (std::abs(dot) > 1e-4) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral(
+                        "NIfTI CT affine contains shear. The dev Move Planes mathematics "
+                        "requires orthogonal image axes, so review was not changed.");
+                }
+                return false;
+            }
+        }
+    }
+
+    std::array<double, 3> origin = {};
+    for (int row = 0; row < 3; ++row) {
+        origin[static_cast<size_t>(row)] = geometry.indexToWorldRas->GetElement(row, 3);
+        if (!std::isfinite(origin[static_cast<size_t>(row)])) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("NIfTI CT affine origin is not finite.");
+            }
+            return false;
+        }
+    }
+
+    clearVolumeGeometry();
+    m_volumeDimensions = geometry.dimensions;
+    m_volumeSpacing = spacing;
+    m_volumeOrigin = origin;
+    m_volumeDirection = direction;
+    for (int axis = 0; axis < 3; ++axis) {
+        const int maximum = std::max(0, m_volumeDimensions[static_cast<size_t>(axis)] - 1);
+        m_positionPlaneSlices[static_cast<size_t>(axis)] = std::clamp(
+            m_positionPlaneSlices[static_cast<size_t>(axis)], 0, maximum);
+    }
+    m_hasVolumeGeometry = true;
+    m_volumeMaskGeometryAligned = true;
+    m_niftiReviewGeometryActive = true;
+    createPositionPlaneActors();
+    qInfo() << "Configured dev position cards for native NIfTI CT"
+            << m_volumeDimensions[0] << "x"
+            << m_volumeDimensions[1] << "x"
+            << m_volumeDimensions[2]
+            << "spacing=" << m_volumeSpacing[0]
+            << m_volumeSpacing[1]
+            << m_volumeSpacing[2]
+            << "RAS origin=" << m_volumeOrigin[0]
+            << m_volumeOrigin[1]
+            << m_volumeOrigin[2];
+    return true;
 }
 
 std::array<double, 3> Mask3DViewerWidget::indexToWorld(
@@ -1212,7 +1354,11 @@ void Mask3DViewerWidget::setPositionPlaneSlice(int axis, int index)
     m_positionPlaneSlices[plane] = std::clamp(index, 0, maximum);
     if (m_positionPlaneSources[plane]) {
         updatePositionPlaneGeometry(axis);
-        updatePositionPlaneMaskIntersection(axis);
+        if (m_multiStructurePreviewActive) {
+            updatePositionPlaneCategoricalIntersections(axis);
+        } else {
+            updatePositionPlaneMaskIntersection(axis);
+        }
         m_renderWindow->Render();
     }
 }
@@ -1262,7 +1408,8 @@ void Mask3DViewerWidget::setSagittalPlaneVisible(bool visible)
 
 void Mask3DViewerWidget::updatePositionPlaneGeometry(int axis)
 {
-    if (axis < 0 || axis > 2 || !m_hasVolumeGeometry || !m_hasSurfaceFrameBounds) {
+    if (axis < 0 || axis > 2 || !m_hasVolumeGeometry
+        || (!m_niftiReviewGeometryActive && !m_hasSurfaceFrameBounds)) {
         return;
     }
     vtkPlaneSource *source = m_positionPlaneSources[static_cast<size_t>(axis)];
@@ -1272,31 +1419,63 @@ void Mask3DViewerWidget::updatePositionPlaneGeometry(int axis)
         return;
     }
 
-    std::array<double, 3> sliceIndex = {0.0, 0.0, 0.0};
-    sliceIndex[static_cast<size_t>(axis)] =
-        static_cast<double>(m_positionPlaneSlices[static_cast<size_t>(axis)]);
-    const std::array<double, 3> sliceWorld = indexToWorld(sliceIndex);
     PlaneCorners corners = {};
 
-    switch (axis) {
-    case 0: // Sagittal: fixed world X, spans Y/Z guide bounds.
-        corners = {{{sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[4]},
-                    {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[4]},
-                    {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[5]},
-                    {sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[5]}}};
-        break;
-    case 1: // Coronal: fixed world Y, spans X/Z guide bounds.
-        corners = {{{m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[4]},
-                    {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[4]},
-                    {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[5]},
-                    {m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[5]}}};
-        break;
-    case 2: // Axial: fixed world Z, spans X/Y guide bounds.
-        corners = {{{m_surfaceFrameBounds[0], m_surfaceFrameBounds[2], sliceWorld[2]},
-                    {m_surfaceFrameBounds[1], m_surfaceFrameBounds[2], sliceWorld[2]},
-                    {m_surfaceFrameBounds[1], m_surfaceFrameBounds[3], sliceWorld[2]},
-                    {m_surfaceFrameBounds[0], m_surfaceFrameBounds[3], sliceWorld[2]}}};
-        break;
+    if (m_niftiReviewGeometryActive) {
+        const double slice = static_cast<double>(
+            m_positionPlaneSlices[static_cast<size_t>(axis)]);
+        PlaneCorners indexCorners = {};
+        switch (axis) {
+        case 0:
+            indexCorners = {{{slice, -0.5, -0.5},
+                             {slice, m_volumeDimensions[1] - 0.5, -0.5},
+                             {slice, m_volumeDimensions[1] - 0.5,
+                                     m_volumeDimensions[2] - 0.5},
+                             {slice, -0.5, m_volumeDimensions[2] - 0.5}}};
+            break;
+        case 1:
+            indexCorners = {{{-0.5, slice, -0.5},
+                             {m_volumeDimensions[0] - 0.5, slice, -0.5},
+                             {m_volumeDimensions[0] - 0.5, slice,
+                                     m_volumeDimensions[2] - 0.5},
+                             {-0.5, slice, m_volumeDimensions[2] - 0.5}}};
+            break;
+        case 2:
+            indexCorners = {{{-0.5, -0.5, slice},
+                             {m_volumeDimensions[0] - 0.5, -0.5, slice},
+                             {m_volumeDimensions[0] - 0.5,
+                                     m_volumeDimensions[1] - 0.5, slice},
+                             {-0.5, m_volumeDimensions[1] - 0.5, slice}}};
+            break;
+        }
+        for (size_t corner = 0; corner < corners.size(); ++corner) {
+            corners[corner] = indexToWorld(indexCorners[corner]);
+        }
+    } else {
+        std::array<double, 3> sliceIndex = {0.0, 0.0, 0.0};
+        sliceIndex[static_cast<size_t>(axis)] =
+            static_cast<double>(m_positionPlaneSlices[static_cast<size_t>(axis)]);
+        const std::array<double, 3> sliceWorld = indexToWorld(sliceIndex);
+        switch (axis) {
+        case 0: // Sagittal: fixed world X, spans Y/Z guide bounds.
+            corners = {{{sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[4]},
+                        {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[4]},
+                        {sliceWorld[0], m_surfaceFrameBounds[3], m_surfaceFrameBounds[5]},
+                        {sliceWorld[0], m_surfaceFrameBounds[2], m_surfaceFrameBounds[5]}}};
+            break;
+        case 1: // Coronal: fixed world Y, spans X/Z guide bounds.
+            corners = {{{m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[4]},
+                        {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[4]},
+                        {m_surfaceFrameBounds[1], sliceWorld[1], m_surfaceFrameBounds[5]},
+                        {m_surfaceFrameBounds[0], sliceWorld[1], m_surfaceFrameBounds[5]}}};
+            break;
+        case 2: // Axial: fixed world Z, spans X/Y guide bounds.
+            corners = {{{m_surfaceFrameBounds[0], m_surfaceFrameBounds[2], sliceWorld[2]},
+                        {m_surfaceFrameBounds[1], m_surfaceFrameBounds[2], sliceWorld[2]},
+                        {m_surfaceFrameBounds[1], m_surfaceFrameBounds[3], sliceWorld[2]},
+                        {m_surfaceFrameBounds[0], m_surfaceFrameBounds[3], sliceWorld[2]}}};
+            break;
+        }
     }
 
     logPositionPlaneState("before update",
@@ -1487,6 +1666,140 @@ void Mask3DViewerWidget::updateAllPositionPlaneMaskIntersections()
     }
 }
 
+int Mask3DViewerWidget::categoricalValueAtCtIndex(
+    const std::array<double, 3> &ctIndex) const
+{
+    if (!m_multiStructurePreviewActive
+        || !m_multiStructureVolume.segmentationImage
+        || !m_multiStructureVolume.ctIndexToSegmentationIndex) {
+        return 0;
+    }
+
+    const double input[4] = {ctIndex[0], ctIndex[1], ctIndex[2], 1.0};
+    double segmentationIndex[4] = {};
+    m_multiStructureVolume.ctIndexToSegmentationIndex->MultiplyPoint(
+        input, segmentationIndex);
+    const int x = static_cast<int>(std::lround(segmentationIndex[0]));
+    const int y = static_cast<int>(std::lround(segmentationIndex[1]));
+    const int z = static_cast<int>(std::lround(segmentationIndex[2]));
+    const auto dimensions = m_multiStructureVolume.segmentationGeometry.dimensions;
+    if (x < 0 || y < 0 || z < 0
+        || x >= dimensions[0] || y >= dimensions[1] || z >= dimensions[2]) {
+        return 0;
+    }
+    return static_cast<int>(std::lround(
+        m_multiStructureVolume.segmentationImage->GetScalarComponentAsDouble(
+            x, y, z, 0)));
+}
+
+void Mask3DViewerWidget::updatePositionPlaneCategoricalIntersections(int axis)
+{
+    if (axis < 0 || axis > 2) {
+        return;
+    }
+
+    const size_t plane = static_cast<size_t>(axis);
+    std::vector<vtkSmartPointer<vtkPoints>> pointsByLabel;
+    std::vector<vtkSmartPointer<vtkCellArray>> quadsByLabel;
+    pointsByLabel.reserve(m_multiStructureSurfaces.size());
+    quadsByLabel.reserve(m_multiStructureSurfaces.size());
+    for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        pointsByLabel.push_back(vtkSmartPointer<vtkPoints>::New());
+        quadsByLabel.push_back(vtkSmartPointer<vtkCellArray>::New());
+        if (surface.cardIntersectionData[plane]) {
+            surface.cardIntersectionData[plane]->SetPoints(pointsByLabel.back());
+            surface.cardIntersectionData[plane]->SetPolys(quadsByLabel.back());
+            surface.cardIntersectionData[plane]->Modified();
+        }
+    }
+
+    if (!m_multiStructurePreviewActive || !m_niftiReviewGeometryActive
+        || !m_hasVolumeGeometry || m_multiStructureSurfaces.empty()) {
+        return;
+    }
+
+    const int slice = m_positionPlaneSlices[plane];
+    const int firstInPlaneAxis = axis == 0 ? 1 : 0;
+    const int secondInPlaneAxis = axis == 2 ? 1 : 2;
+    const double visualOffset = std::max(
+        1e-5, m_volumeSpacing[plane] * 0.012);
+    std::array<double, 3> normal = {
+        m_volumeDirection[plane],
+        m_volumeDirection[3 + plane],
+        m_volumeDirection[6 + plane]
+    };
+
+    for (int second = 0;
+         second < m_volumeDimensions[static_cast<size_t>(secondInPlaneAxis)];
+         ++second) {
+        for (int first = 0;
+             first < m_volumeDimensions[static_cast<size_t>(firstInPlaneAxis)];
+             ++first) {
+            std::array<double, 3> center = {0.0, 0.0, 0.0};
+            center[plane] = static_cast<double>(slice);
+            center[static_cast<size_t>(firstInPlaneAxis)] =
+                static_cast<double>(first);
+            center[static_cast<size_t>(secondInPlaneAxis)] =
+                static_cast<double>(second);
+            const int labelValue = categoricalValueAtCtIndex(center);
+            const auto surfaceIt = std::find_if(
+                m_multiStructureSurfaces.cbegin(),
+                m_multiStructureSurfaces.cend(),
+                [labelValue](const MultiStructureSurface &surface) {
+                    return surface.label.value == labelValue;
+                });
+            if (surfaceIt == m_multiStructureSurfaces.cend()) {
+                continue;
+            }
+            const size_t labelIndex = static_cast<size_t>(
+                std::distance(m_multiStructureSurfaces.cbegin(), surfaceIt));
+
+            std::array<std::array<double, 3>, 4> cornerIndices = {
+                center, center, center, center
+            };
+            cornerIndices[0][static_cast<size_t>(firstInPlaneAxis)] -= 0.5;
+            cornerIndices[0][static_cast<size_t>(secondInPlaneAxis)] -= 0.5;
+            cornerIndices[1][static_cast<size_t>(firstInPlaneAxis)] += 0.5;
+            cornerIndices[1][static_cast<size_t>(secondInPlaneAxis)] -= 0.5;
+            cornerIndices[2][static_cast<size_t>(firstInPlaneAxis)] += 0.5;
+            cornerIndices[2][static_cast<size_t>(secondInPlaneAxis)] += 0.5;
+            cornerIndices[3][static_cast<size_t>(firstInPlaneAxis)] -= 0.5;
+            cornerIndices[3][static_cast<size_t>(secondInPlaneAxis)] += 0.5;
+
+            vtkIdType pointIds[4] = {};
+            for (size_t corner = 0; corner < cornerIndices.size(); ++corner) {
+                std::array<double, 3> world = indexToWorld(cornerIndices[corner]);
+                for (int component = 0; component < 3; ++component) {
+                    world[static_cast<size_t>(component)] +=
+                        normal[static_cast<size_t>(component)] * visualOffset;
+                }
+                pointIds[corner] =
+                    pointsByLabel[labelIndex]->InsertNextPoint(world.data());
+            }
+            quadsByLabel[labelIndex]->InsertNextCell(4, pointIds);
+        }
+    }
+
+    for (size_t labelIndex = 0;
+         labelIndex < m_multiStructureSurfaces.size();
+         ++labelIndex) {
+        vtkPolyData *data =
+            m_multiStructureSurfaces[labelIndex].cardIntersectionData[plane];
+        if (data) {
+            data->SetPoints(pointsByLabel[labelIndex]);
+            data->SetPolys(quadsByLabel[labelIndex]);
+            data->Modified();
+        }
+    }
+}
+
+void Mask3DViewerWidget::updateAllPositionPlaneCategoricalIntersections()
+{
+    for (int axis = 0; axis < 3; ++axis) {
+        updatePositionPlaneCategoricalIntersections(axis);
+    }
+}
+
 void Mask3DViewerWidget::updateMaskIntersections(const MaskVolume &mask,
                                                  bool updateAxial,
                                                  bool updateCoronal,
@@ -1520,7 +1833,7 @@ void Mask3DViewerWidget::updateMaskIntersections(const MaskVolume &mask,
 void Mask3DViewerWidget::updatePositionPlaneVisibility()
 {
     const bool geometryReady = m_hasVolumeGeometry && m_volumeMaskGeometryAligned
-        && m_hasSurfaceFrameBounds;
+        && (m_niftiReviewGeometryActive || m_hasSurfaceFrameBounds);
     for (int axis = 0; axis < 3; ++axis) {
         const size_t plane = static_cast<size_t>(axis);
         const bool visible = geometryReady && m_positionPlaneVisibilityRequested[plane];
@@ -1528,10 +1841,19 @@ void Mask3DViewerWidget::updatePositionPlaneVisibility()
             m_positionPlaneFillActors[plane]->SetVisibility(visible);
         }
         if (m_positionPlaneIntersectionActors[plane]) {
-            m_positionPlaneIntersectionActors[plane]->SetVisibility(visible);
+            m_positionPlaneIntersectionActors[plane]->SetVisibility(
+                visible && !m_multiStructurePreviewActive);
         }
         if (m_positionPlaneBorderActors[plane]) {
             m_positionPlaneBorderActors[plane]->SetVisibility(visible);
+        }
+        for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+            vtkActor *categoricalActor = surface.cardIntersectionActors[plane];
+            if (categoricalActor) {
+                const bool labelVisible = surface.actor && surface.actor->GetVisibility();
+                categoricalActor->SetVisibility(
+                    visible && m_multiStructurePreviewActive && labelVisible);
+            }
         }
     }
     updatePlanePickerList();
@@ -1586,6 +1908,11 @@ double Mask3DViewerWidget::surfaceOpacity() const
 
 void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
 {
+    const bool returningFromMultiStructurePreview = m_multiStructurePreviewActive;
+    removeMultiStructurePreview(false);
+    if (returningFromMultiStructurePreview) {
+        clearVolumeGeometry();
+    }
     if (!mask.isValid()) {
         qWarning() << "Mask3DViewerWidget: invalid mask; clearing 3D surface.";
         clear();
@@ -1665,7 +1992,7 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
     m_renderer->AddActor(m_maskActor);
     updateModelBoundsGuide(surfaceBounds);
 
-    const bool firstRenderedMask = !m_hasRenderedMask;
+    const bool firstRenderedMask = !m_hasRenderedMask || returningFromMultiStructurePreview;
     m_hasRenderedMask = true;
     if (firstRenderedMask) {
         resetCamera();
@@ -1678,4 +2005,425 @@ void Mask3DViewerWidget::refreshFromMask(const MaskVolume &mask)
             << mask.width << "x" << mask.height << "x" << mask.depth
             << "spacing=(" << spacingValue(mask, 0) << "," << spacingValue(mask, 1) << "," << spacingValue(mask, 2) << ")"
             << "foreground voxels=" << nonzeroCount;
+}
+
+bool Mask3DViewerWidget::loadMultiStructurePreview(const QString &ctPath,
+                                                    const QString &segmentationPath,
+                                                    QString *errorMessage)
+{
+    MultiStructureVolume loadedVolume;
+    MultiStructureNiftiLoader loader;
+    if (!loader.load(ctPath, segmentationPath, &loadedVolume, errorMessage)) {
+        return false;
+    }
+    return setMultiStructurePreview(loadedVolume, errorMessage);
+}
+
+bool Mask3DViewerWidget::setMultiStructurePreview(
+    const MultiStructureVolume &volume,
+    QString *errorMessage)
+{
+    if (!volume.isValid()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("The NIfTI review volume is incomplete.");
+        }
+        return false;
+    }
+    MultiStructureVolume loadedVolume = volume;
+    std::vector<MultiStructureSurface> extractedSurfaces;
+    extractedSurfaces.reserve(loadedVolume.labels.size());
+    for (const MultiStructureLabelInfo &label : loadedVolume.labels) {
+        QElapsedTimer extractionTimer;
+        extractionTimer.start();
+
+        vtkNew<vtkExtractVOI> labelRegion;
+        labelRegion->SetInputData(loadedVolume.segmentationImage);
+        const auto dimensions = loadedVolume.segmentationGeometry.dimensions;
+        labelRegion->SetVOI(
+            std::max(0, label.indexBounds[0] - 1),
+            std::min(dimensions[0] - 1, label.indexBounds[1] + 1),
+            std::max(0, label.indexBounds[2] - 1),
+            std::min(dimensions[1] - 1, label.indexBounds[3] + 1),
+            std::max(0, label.indexBounds[4] - 1),
+            std::min(dimensions[2] - 1, label.indexBounds[5] + 1));
+
+        vtkNew<vtkDiscreteFlyingEdges3D> extractor;
+        extractor->SetInputConnection(labelRegion->GetOutputPort());
+        extractor->SetValue(0, static_cast<double>(label.value));
+        extractor->Update();
+
+        vtkPolyData *output = extractor->GetOutput();
+        if (!output || output->GetNumberOfPoints() == 0 || output->GetNumberOfCells() == 0) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Surface extraction produced no geometry for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+
+        double localBounds[6] = {};
+        output->GetBounds(localBounds);
+        if (!boundsAreValid(localBounds)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Surface extraction produced invalid bounds for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+        double point[3] = {};
+        for (vtkIdType pointId = 0; pointId < output->GetNumberOfPoints(); ++pointId) {
+            output->GetPoint(pointId, point);
+            if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral("Surface extraction produced non-finite coordinates for %1.")
+                                        .arg(label.displayName);
+                }
+                return false;
+            }
+        }
+
+        MultiStructureSurface surface;
+        surface.label = label;
+        surface.polyData = vtkSmartPointer<vtkPolyData>::New();
+        surface.polyData->ShallowCopy(output);
+        surface.mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        surface.mapper->SetInputData(surface.polyData);
+        surface.mapper->ScalarVisibilityOff();
+        surface.actor = vtkSmartPointer<vtkActor>::New();
+        surface.actor->SetMapper(surface.mapper);
+        surface.actor->SetUserMatrix(loadedVolume.segmentationGeometry.dataToWorldRas);
+        surface.actor->SetPickable(false);
+        surface.actor->GetProperty()->SetColor(label.color[0], label.color[1], label.color[2]);
+        surface.actor->GetProperty()->SetOpacity(label.defaultOpacity);
+        surface.actor->GetProperty()->SetSpecular(0.15);
+        surface.actor->GetProperty()->SetSpecularPower(16.0);
+        for (int axis = 0; axis < 3; ++axis) {
+            const size_t plane = static_cast<size_t>(axis);
+            surface.cardIntersectionData[plane] =
+                vtkSmartPointer<vtkPolyData>::New();
+            surface.cardIntersectionMappers[plane] =
+                vtkSmartPointer<vtkPolyDataMapper>::New();
+            surface.cardIntersectionMappers[plane]->SetInputData(
+                surface.cardIntersectionData[plane]);
+            surface.cardIntersectionMappers[plane]->ScalarVisibilityOff();
+            surface.cardIntersectionActors[plane] =
+                vtkSmartPointer<vtkActor>::New();
+            surface.cardIntersectionActors[plane]->SetMapper(
+                surface.cardIntersectionMappers[plane]);
+            surface.cardIntersectionActors[plane]->SetPickable(false);
+            surface.cardIntersectionActors[plane]->SetUseBounds(false);
+            surface.cardIntersectionActors[plane]->GetProperty()->SetColor(
+                label.color[0], label.color[1], label.color[2]);
+            surface.cardIntersectionActors[plane]->GetProperty()
+                ->SetRepresentationToSurface();
+            surface.cardIntersectionActors[plane]->GetProperty()->SetOpacity(
+                label.defaultOpacity);
+            surface.cardIntersectionActors[plane]->GetProperty()->LightingOff();
+            surface.cardIntersectionActors[plane]->GetProperty()->SetAmbient(1.0);
+            surface.cardIntersectionActors[plane]->GetProperty()->SetDiffuse(0.0);
+            surface.cardIntersectionActors[plane]->GetProperty()->SetSpecular(0.0);
+            surface.cardIntersectionActors[plane]->GetProperty()->BackfaceCullingOff();
+            surface.cardIntersectionActors[plane]->GetProperty()->FrontfaceCullingOff();
+        }
+        surface.extractionMilliseconds = extractionTimer.elapsed();
+
+        double worldBounds[6] = {};
+        surface.actor->GetBounds(worldBounds);
+        if (!boundsAreValid(worldBounds)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Physical transform produced invalid world bounds for %1.")
+                                    .arg(label.displayName);
+            }
+            return false;
+        }
+
+        qInfo() << "Extracted multi-structure surface"
+                << label.displayName
+                << "value=" << label.value
+                << "points=" << surface.polyData->GetNumberOfPoints()
+                << "cells=" << surface.polyData->GetNumberOfCells()
+                << "time ms=" << surface.extractionMilliseconds
+                << "world RAS bounds mm="
+                << worldBounds[0] << worldBounds[1]
+                << worldBounds[2] << worldBounds[3]
+                << worldBounds[4] << worldBounds[5];
+        extractedSurfaces.push_back(std::move(surface));
+    }
+
+    endPlaneDrag();
+    if (!setNiftiReviewVolumeGeometry(loadedVolume.ctGeometry, errorMessage)) {
+        return false;
+    }
+    removeMultiStructurePreview(false);
+    if (m_maskActor) {
+        m_maskActor->SetVisibility(false);
+    }
+    if (m_boundsActor) {
+        m_boundsActor->SetVisibility(false);
+    }
+    m_multiStructureVolume = std::move(loadedVolume);
+    m_multiStructureSurfaces = std::move(extractedSurfaces);
+    m_multiStructurePreviewActive = true;
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        m_renderer->AddActor(surface.actor);
+        for (vtkActor *intersectionActor : surface.cardIntersectionActors) {
+            if (intersectionActor) {
+                m_renderer->AddActor(intersectionActor);
+            }
+        }
+    }
+    updateOrientationLabelsForRasWorld();
+    updateMultiStructureBoundsGuide();
+    updateAllPositionPlaneGeometry();
+    updateAllPositionPlaneCategoricalIntersections();
+    updatePositionPlaneVisibility();
+    resetCamera();
+    return true;
+}
+
+bool Mask3DViewerWidget::isMultiStructurePreviewActive() const
+{
+    return m_multiStructurePreviewActive;
+}
+
+std::vector<Mask3DViewerWidget::MultiStructureSurfaceInfo>
+Mask3DViewerWidget::multiStructureSurfaces() const
+{
+    std::vector<MultiStructureSurfaceInfo> surfaceInfos;
+    surfaceInfos.reserve(m_multiStructureSurfaces.size());
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        MultiStructureSurfaceInfo info;
+        info.labelValue = surface.label.value;
+        info.displayName = surface.label.displayName;
+        info.voxelCount = surface.label.voxelCount;
+        info.pointCount = surface.polyData ? surface.polyData->GetNumberOfPoints() : 0;
+        info.cellCount = surface.polyData ? surface.polyData->GetNumberOfCells() : 0;
+        info.extractionMilliseconds = surface.extractionMilliseconds;
+        info.color = surface.label.color;
+        info.opacity = surface.actor ? surface.actor->GetProperty()->GetOpacity() : 0.0;
+        info.visible = surface.actor && surface.actor->GetVisibility();
+        surfaceInfos.push_back(info);
+    }
+    return surfaceInfos;
+}
+
+void Mask3DViewerWidget::setMultiStructureVisible(int labelValue, bool visible)
+{
+    for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.label.value == labelValue && surface.actor) {
+            surface.actor->SetVisibility(visible);
+            for (vtkActor *intersectionActor : surface.cardIntersectionActors) {
+                if (intersectionActor) {
+                    intersectionActor->SetVisibility(visible);
+                }
+            }
+            updateMultiStructureBoundsGuide();
+            updatePositionPlaneVisibility();
+            m_renderer->ResetCameraClippingRange();
+            m_renderWindow->Render();
+            return;
+        }
+    }
+}
+
+void Mask3DViewerWidget::setMultiStructureOpacity(int labelValue, double opacity)
+{
+    const double clampedOpacity = std::clamp(opacity, 0.0, 1.0);
+    for (MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.label.value == labelValue && surface.actor) {
+            surface.actor->GetProperty()->SetOpacity(clampedOpacity);
+            for (vtkActor *intersectionActor :
+                 surface.cardIntersectionActors) {
+                if (intersectionActor) {
+                    intersectionActor->GetProperty()->SetOpacity(
+                        clampedOpacity);
+                }
+            }
+            m_renderWindow->Render();
+            return;
+        }
+    }
+}
+
+void Mask3DViewerWidget::removeMultiStructurePreview(bool restoreNormalMask)
+{
+    const bool wasActive = m_multiStructurePreviewActive;
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.actor) {
+            m_renderer->RemoveActor(surface.actor);
+        }
+        for (vtkActor *intersectionActor : surface.cardIntersectionActors) {
+            if (intersectionActor) {
+                m_renderer->RemoveActor(intersectionActor);
+            }
+        }
+    }
+    m_multiStructureSurfaces.clear();
+    m_multiStructureVolume = {};
+    clearMultiStructureBoundsGuide();
+    m_multiStructurePreviewActive = false;
+
+    if (wasActive) {
+        if (m_hasIntersectionMask) {
+            updateOrientationLabels(m_intersectionMask);
+        } else {
+            static constexpr const char *fallbackPlus[3] = {"+X", "+Y", "+Z"};
+            static constexpr const char *fallbackMinus[3] = {"-X", "-Y", "-Z"};
+            setOrientationLabels(fallbackPlus, fallbackMinus);
+        }
+    }
+
+    if (!restoreNormalMask) {
+        return;
+    }
+
+    if (m_maskActor) {
+        m_maskActor->SetVisibility(true);
+    }
+    if (m_boundsActor) {
+        m_boundsActor->SetVisibility(true);
+    }
+    updatePositionPlaneVisibility();
+    m_renderer->ResetCameraClippingRange();
+    m_renderWindow->Render();
+}
+
+void Mask3DViewerWidget::clearMultiStructurePreview()
+{
+    if (!m_multiStructurePreviewActive) {
+        return;
+    }
+    endPlaneDrag();
+    removeMultiStructurePreview(false);
+    clearVolumeGeometry();
+    if (m_maskActor) {
+        m_maskActor->SetVisibility(true);
+    }
+    if (m_boundsActor) {
+        m_boundsActor->SetVisibility(true);
+    }
+    m_renderer->ResetCameraClippingRange();
+    m_renderWindow->Render();
+}
+
+const vtkImageData *Mask3DViewerWidget::activeNiftiCtImage() const
+{
+    return m_multiStructurePreviewActive ? m_multiStructureVolume.ctImage.GetPointer()
+                                         : nullptr;
+}
+
+const NiftiVolumeGeometry *Mask3DViewerWidget::activeNiftiCtGeometry() const
+{
+    return m_multiStructurePreviewActive ? &m_multiStructureVolume.ctGeometry
+                                         : nullptr;
+}
+
+const vtkImageData *Mask3DViewerWidget::activeNiftiLabel2000Mask() const
+{
+    return m_multiStructurePreviewActive
+        ? m_multiStructureVolume.label2000BinaryImage.GetPointer()
+        : nullptr;
+}
+
+const vtkPolyData *Mask3DViewerWidget::activeNiftiLabel2000Surface() const
+{
+    if (!m_multiStructurePreviewActive) {
+        return nullptr;
+    }
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (surface.label.value == 2000) {
+            return surface.polyData;
+        }
+    }
+    return nullptr;
+}
+
+const vtkMatrix4x4 *
+Mask3DViewerWidget::activeNiftiSegmentationToCtIndexTransform() const
+{
+    return m_multiStructurePreviewActive
+        ? m_multiStructureVolume.segmentationIndexToCtIndex.GetPointer()
+        : nullptr;
+}
+
+const vtkMatrix4x4 *
+Mask3DViewerWidget::activeNiftiSegmentationToCtPhysicalTransform() const
+{
+    return m_multiStructurePreviewActive
+        ? m_multiStructureVolume.segmentationDataToCtData.GetPointer()
+        : nullptr;
+}
+
+bool Mask3DViewerWidget::visibleMultiStructureBounds(double bounds[6]) const
+{
+    bounds[0] = bounds[2] = bounds[4] = std::numeric_limits<double>::infinity();
+    bounds[1] = bounds[3] = bounds[5] = -std::numeric_limits<double>::infinity();
+    bool foundVisibleSurface = false;
+    for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
+        if (!surface.actor || !surface.actor->GetVisibility()) {
+            continue;
+        }
+        double actorBounds[6] = {};
+        surface.actor->GetBounds(actorBounds);
+        if (!boundsAreValid(actorBounds)) {
+            continue;
+        }
+        foundVisibleSurface = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds[axis * 2] = std::min(bounds[axis * 2], actorBounds[axis * 2]);
+            bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], actorBounds[axis * 2 + 1]);
+        }
+    }
+    return foundVisibleSurface && boundsAreValid(bounds);
+}
+
+void Mask3DViewerWidget::clearMultiStructureBoundsGuide()
+{
+    if (m_multiStructureBoundsActor) {
+        m_renderer->RemoveActor(m_multiStructureBoundsActor);
+        m_multiStructureBoundsActor = nullptr;
+    }
+}
+
+void Mask3DViewerWidget::updateMultiStructureBoundsGuide()
+{
+    clearMultiStructureBoundsGuide();
+    if (!m_multiStructurePreviewActive) {
+        return;
+    }
+
+    double bounds[6] = {};
+    if (!visibleMultiStructureBounds(bounds)) {
+        return;
+    }
+
+    const double sizeX = bounds[1] - bounds[0];
+    const double sizeY = bounds[3] - bounds[2];
+    const double sizeZ = bounds[5] - bounds[4];
+    const double largestDimension = std::max({sizeX, sizeY, sizeZ});
+    constexpr double marginRatio = 0.08;
+    constexpr double minimumCubeSideLength = 1.0;
+    const double cubeSideLength = std::max(largestDimension * (1.0 + 2.0 * marginRatio),
+                                           minimumCubeSideLength);
+    const double halfSide = cubeSideLength * 0.5;
+    const double centerX = (bounds[0] + bounds[1]) * 0.5;
+    const double centerY = (bounds[2] + bounds[3]) * 0.5;
+    const double centerZ = (bounds[4] + bounds[5]) * 0.5;
+
+    vtkNew<vtkOutlineSource> boundsSource;
+    boundsSource->SetBounds(centerX - halfSide, centerX + halfSide,
+                            centerY - halfSide, centerY + halfSide,
+                            centerZ - halfSide, centerZ + halfSide);
+
+    vtkNew<vtkPolyDataMapper> boundsMapper;
+    boundsMapper->SetInputConnection(boundsSource->GetOutputPort());
+    boundsMapper->ScalarVisibilityOff();
+
+    m_multiStructureBoundsActor = vtkSmartPointer<vtkActor>::New();
+    m_multiStructureBoundsActor->SetMapper(boundsMapper);
+    m_multiStructureBoundsActor->SetPickable(false);
+    m_multiStructureBoundsActor->GetProperty()->SetColor(0.72, 0.75, 0.80);
+    m_multiStructureBoundsActor->GetProperty()->SetOpacity(0.38);
+    m_multiStructureBoundsActor->GetProperty()->SetLineWidth(1.25);
+    m_renderer->AddActor(m_multiStructureBoundsActor);
 }

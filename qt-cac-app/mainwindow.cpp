@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -32,6 +33,10 @@ MainWindow::MainWindow(QWidget *parent)
     , m_currentJobId(-1)
     , m_pendingCorrectedMaskVersion(-1)
     , m_backendConnected(false)
+    , m_jobInProgress(false)
+    , m_niftiReviewActive(false)
+    , m_caseCacheLoadDeferredDuringNiftiReview(false)
+    , m_scoreRecalculationDeferredJobId(-1)
 {
     ui->setupUi(this);
     setupCtViewer();
@@ -49,6 +54,32 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (!m_ctViewerWidget || !m_ctViewerWidget->hasUnsavedEdits()) {
         QMainWindow::closeEvent(event);
+        return;
+    }
+
+    if (m_niftiReviewActive) {
+        QMessageBox dialog(this);
+        dialog.setIcon(QMessageBox::Warning);
+        dialog.setWindowTitle(QStringLiteral("Unsaved CAC Mask Edits"));
+        dialog.setText(QStringLiteral(
+            "The normal CAC case has unsaved mask edits. NIfTI Review is read-only, "
+            "so those edits cannot be saved until you return to normal CAC mode."));
+        dialog.setInformativeText(QStringLiteral(
+            "Choose Keep Editing, then use Refresh 3D to leave NIfTI Review and save "
+            "the corrected mask. Closing now will discard the unsaved CAC edits."));
+        QPushButton *keepButton =
+            dialog.addButton(QStringLiteral("Keep Editing"), QMessageBox::RejectRole);
+        QPushButton *discardButton =
+            dialog.addButton(QStringLiteral("Discard Edits and Close"), QMessageBox::DestructiveRole);
+        dialog.setDefaultButton(keepButton);
+        dialog.setEscapeButton(keepButton);
+        dialog.exec();
+
+        if (dialog.clickedButton() == discardButton) {
+            event->accept();
+        } else {
+            event->ignore();
+        }
         return;
     }
 
@@ -135,6 +166,7 @@ void MainWindow::connectSignals()
             this, &MainWindow::openServerSettings);
 
     connect(m_backendClient, &BackendClient::jobCreated, this, [this](qint64 jobId) {
+        setJobInProgress(true);
         m_currentJobId = jobId;
         ui->jobIdLabel->setText(QStringLiteral("Job ID: %1").arg(jobId));
         ui->statusLabel->setText(QStringLiteral("Status: SUBMITTED"));
@@ -143,8 +175,12 @@ void MainWindow::connectSignals()
         m_webSocketClient->connectToServer(jobId);
     });
     connect(m_backendClient, &BackendClient::jobResultFetched,
-            this, &MainWindow::displayResult);
+            this, [this](const QJsonObject &result) {
+        setJobInProgress(false);
+        displayResult(result);
+    });
     connect(m_backendClient, &BackendClient::errorOccurred, this, [this](const QString &message) {
+        setJobInProgress(false);
         appendLog(message);
         QMessageBox::warning(this, QStringLiteral("Backend Error"), message);
         updateSubmitButton();
@@ -158,12 +194,13 @@ void MainWindow::connectSignals()
         appendLog(QStringLiteral("Job %1: %2 (%3%)").arg(jobId).arg(status).arg(progress));
 
         if (status.compare(QStringLiteral("SUCCESS"), Qt::CaseInsensitive) == 0) {
+            setJobInProgress(false);
             ui->progressBar->setValue(100);
             appendLog(QStringLiteral("Fetching result..."));
             m_backendClient->getJobResult(jobId);
             m_webSocketClient->disconnectFromServer();
         } else if (status.compare(QStringLiteral("FAILED"), Qt::CaseInsensitive) == 0) {
-            updateSubmitButton();
+            setJobInProgress(false);
             m_webSocketClient->disconnectFromServer();
         }
     });
@@ -172,6 +209,7 @@ void MainWindow::connectSignals()
         appendLog(message);
     });
     connect(m_webSocketClient, &JobWebSocketClient::errorOccurred, this, [this](const QString &message) {
+        setJobInProgress(false);
         appendLog(message);
     });
 
@@ -253,6 +291,11 @@ void MainWindow::connectSignals()
     if (m_ctViewerWidget) {
         connect(m_ctViewerWidget, &CTViewerWidget::correctedMaskSaved,
                 this, [this](int version, const QString &rawPath, const QString &metadataPath) {
+            if (m_niftiReviewActive) {
+                appendLog(QStringLiteral(
+                    "Ignored corrected-mask upload while NIfTI Review — Read Only is active."));
+                return;
+            }
             appendLog(QStringLiteral("Corrected mask v%1 saved locally: %2").arg(version).arg(rawPath));
             m_pendingCorrectedMaskVersion = version;
             m_pendingCorrectedMaskMetadataPath = metadataPath;
@@ -278,6 +321,8 @@ void MainWindow::connectSignals()
             appendLog(QStringLiteral("Uploading corrected mask v%1 for job %2...").arg(version).arg(m_currentJobId));
             m_backendFileClient->uploadCorrectedMask(m_currentJobId, rawPath, metadataPath);
         });
+        connect(m_ctViewerWidget, &CTViewerWidget::niftiReviewModeChanged,
+                this, &MainWindow::setNiftiReviewModeActive);
     }
 
     connect(m_backendFileClient, &BackendFileClient::correctedMaskUploaded,
@@ -294,6 +339,12 @@ void MainWindow::connectSignals()
                       .arg(backendVersion == m_pendingCorrectedMaskVersion ? QStringLiteral("true") : QStringLiteral("false")));
         if (backendVersion != m_pendingCorrectedMaskVersion) {
             appendLog(QStringLiteral("WARNING: Backend corrected mask version does not match the local saved version."));
+        }
+        if (m_niftiReviewActive) {
+            m_scoreRecalculationDeferredJobId = jobId;
+            appendLog(QStringLiteral(
+                "Score recalculation deferred until NIfTI read-only review ends."));
+            return;
         }
         appendLog(QStringLiteral("Requesting score-only recalculation for job %1...").arg(jobId));
         m_backendFileClient->requestScoreRecalculation(jobId);
@@ -377,6 +428,15 @@ bool MainWindow::validateInputs() const
 
 void MainWindow::submitJob()
 {
+    if (m_niftiReviewActive) {
+        appendLog(QStringLiteral(
+            "Analysis submission is disabled while NIfTI Review — Read Only is active."));
+        return;
+    }
+    if (m_jobInProgress) {
+        appendLog(QStringLiteral("An analysis job is already in progress."));
+        return;
+    }
     if (!m_backendConnected) {
         QMessageBox::warning(this, QStringLiteral("Backend Not Connected"),
                              QStringLiteral("Backend is not connected. Please configure and test server settings first."));
@@ -412,7 +472,7 @@ void MainWindow::submitJob()
         payload.insert(QStringLiteral("useZeroModule"), ui->useZeroModuleCheckBox->isChecked());
     }
 
-    ui->submitButton->setEnabled(false);
+    setJobInProgress(true);
     ui->statusLabel->setText(QStringLiteral("Status: SUBMITTING"));
     appendLog(QStringLiteral("Submitting analysis job..."));
     appendLog(QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact)));
@@ -422,6 +482,12 @@ void MainWindow::submitJob()
 
 void MainWindow::resetForm()
 {
+    if (m_jobInProgress) {
+        appendLog(QStringLiteral("Reset is disabled while an analysis job is in progress."));
+        updateSubmitButton();
+        return;
+    }
+
     m_currentJobId = -1;
     m_currentJobInputPath.clear();
     m_currentCaseKey.clear();
@@ -454,11 +520,12 @@ void MainWindow::resetForm()
 
 void MainWindow::setAdvancedOverridesEnabled(bool enabled)
 {
-    ui->segmentcacsSrcLineEdit->setEnabled(enabled);
-    ui->segmentcacsSrcBrowseButton->setEnabled(enabled);
-    ui->modelLineEdit->setEnabled(enabled);
-    ui->modelBrowseButton->setEnabled(enabled);
-    ui->useZeroModuleCheckBox->setEnabled(enabled);
+    const bool controlsEnabled = enabled && !m_niftiReviewActive;
+    ui->segmentcacsSrcLineEdit->setEnabled(controlsEnabled);
+    ui->segmentcacsSrcBrowseButton->setEnabled(controlsEnabled);
+    ui->modelLineEdit->setEnabled(controlsEnabled);
+    ui->modelBrowseButton->setEnabled(controlsEnabled);
+    ui->useZeroModuleCheckBox->setEnabled(controlsEnabled);
 }
 
 void MainWindow::setBackendConnected(bool connected, const QString &statusText)
@@ -468,9 +535,62 @@ void MainWindow::setBackendConnected(bool connected, const QString &statusText)
     updateSubmitButton();
 }
 
+void MainWindow::setJobInProgress(bool inProgress)
+{
+    m_jobInProgress = inProgress;
+    updateSubmitButton();
+}
+
+void MainWindow::setNiftiReviewModeActive(bool active)
+{
+    if (m_niftiReviewActive == active) {
+        return;
+    }
+
+    m_niftiReviewActive = active;
+    ui->parameterGroupBox->setEnabled(!active);
+    ui->advancedRuntimeOverridesGroupBox->setEnabled(!active);
+    ui->actionServerSettings->setEnabled(!active);
+    if (!active) {
+        setAdvancedOverridesEnabled(ui->enableAdvancedOverridesCheckBox->isChecked());
+    }
+    updateSubmitButton();
+
+    if (active) {
+        appendLog(QStringLiteral(
+            "NIfTI Review — Read Only: analysis, upload, and scoring controls are disabled."));
+        return;
+    }
+
+    appendLog(QStringLiteral("NIfTI read-only review ended; normal CAC controls restored."));
+
+    const qint64 deferredScoreJobId = m_scoreRecalculationDeferredJobId;
+    m_scoreRecalculationDeferredJobId = -1;
+    if (deferredScoreJobId > 0) {
+        appendLog(QStringLiteral("Requesting deferred score-only recalculation for job %1...")
+                      .arg(deferredScoreJobId));
+        m_backendFileClient->requestScoreRecalculation(deferredScoreJobId);
+    }
+
+    if (!m_caseCacheLoadDeferredDuringNiftiReview) {
+        return;
+    }
+    if (m_ctViewerWidget && m_ctViewerWidget->hasUnsavedEdits()) {
+        appendLog(QStringLiteral(
+            "Deferred case-cache load remains pending because the restored CAC "
+            "case has unsaved mask edits."));
+        return;
+    }
+    m_caseCacheLoadDeferredDuringNiftiReview = false;
+    QTimer::singleShot(0, this, [this]() {
+        tryLoadCurrentCaseFromCache();
+    });
+}
+
 void MainWindow::updateSubmitButton()
 {
-    ui->submitButton->setEnabled(m_backendConnected);
+    ui->submitButton->setEnabled(
+        m_backendConnected && !m_niftiReviewActive && !m_jobInProgress);
 }
 
 QString MainWindow::selectedDeviceValue() const
@@ -690,6 +810,14 @@ void MainWindow::handleJobResultFiles(const QJsonObject &result)
 void MainWindow::tryLoadCurrentCaseFromCache()
 {
     if (!m_ctViewerWidget || m_currentCaseKey.isEmpty()) {
+        return;
+    }
+    if (m_niftiReviewActive) {
+        if (!m_caseCacheLoadDeferredDuringNiftiReview) {
+            appendLog(QStringLiteral(
+                "Case-cache viewer load deferred until NIfTI read-only review ends."));
+        }
+        m_caseCacheLoadDeferredDuringNiftiReview = true;
         return;
     }
 

@@ -5,6 +5,7 @@
 
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
+#include "viewer/MultiStructureVolume.h"
 
 #include <vtkActor.h>
 #include <vtkGenericOpenGLRenderWindow.h>
@@ -13,6 +14,8 @@
 #include <vtkSmartPointer.h>
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 class QVTKOpenGLNativeWidget;
 class StrictTrackballCameraStyle;
@@ -23,12 +26,26 @@ class vtkPlaneSource;
 class vtkPoints;
 class vtkPolyData;
 class vtkPolyDataMapper;
+class vtkMatrix4x4;
 
 class Mask3DViewerWidget : public QWidget
 {
     Q_OBJECT
 
 public:
+    struct MultiStructureSurfaceInfo
+    {
+        int labelValue = 0;
+        QString displayName;
+        std::uint64_t voxelCount = 0;
+        vtkIdType pointCount = 0;
+        vtkIdType cellCount = 0;
+        qint64 extractionMilliseconds = 0;
+        std::array<double, 3> color = {1.0, 1.0, 1.0};
+        double opacity = 0.0;
+        bool visible = false;
+    };
+
     explicit Mask3DViewerWidget(QWidget *parent = nullptr);
 
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -51,6 +68,22 @@ public:
     void setSurfaceOpacity(double opacity);
     double surfaceOpacity() const;
     void refreshFromMask(const MaskVolume &mask);
+    bool loadMultiStructurePreview(const QString &ctPath,
+                                   const QString &segmentationPath,
+                                   QString *errorMessage = nullptr);
+    bool setMultiStructurePreview(const MultiStructureVolume &volume,
+                                  QString *errorMessage = nullptr);
+    void clearMultiStructurePreview();
+    bool isMultiStructurePreviewActive() const;
+    std::vector<MultiStructureSurfaceInfo> multiStructureSurfaces() const;
+    void setMultiStructureVisible(int labelValue, bool visible);
+    void setMultiStructureOpacity(int labelValue, double opacity);
+    const vtkImageData *activeNiftiCtImage() const;
+    const NiftiVolumeGeometry *activeNiftiCtGeometry() const;
+    const vtkImageData *activeNiftiLabel2000Mask() const;
+    const vtkPolyData *activeNiftiLabel2000Surface() const;
+    const vtkMatrix4x4 *activeNiftiSegmentationToCtIndexTransform() const;
+    const vtkMatrix4x4 *activeNiftiSegmentationToCtPhysicalTransform() const;
 
 signals:
     void viewportDoubleClicked();
@@ -59,6 +92,18 @@ signals:
     void sagittalPlaneSliceRequested(int index);
 
 private:
+    struct MultiStructureSurface
+    {
+        MultiStructureLabelInfo label;
+        vtkSmartPointer<vtkPolyData> polyData;
+        vtkSmartPointer<vtkPolyDataMapper> mapper;
+        vtkSmartPointer<vtkActor> actor;
+        std::array<vtkSmartPointer<vtkPolyData>, 3> cardIntersectionData;
+        std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> cardIntersectionMappers;
+        std::array<vtkSmartPointer<vtkActor>, 3> cardIntersectionActors;
+        qint64 extractionMilliseconds = 0;
+    };
+
     enum class DraggedPlane {
         None,
         Sagittal,
@@ -79,10 +124,18 @@ private:
     std::array<double, 3> worldToContinuousIndex(const std::array<double, 3> &world) const;
     void setupOrientationMarker();
     void updateOrientationLabels(const MaskVolume &mask);
+    void updateOrientationLabelsForRasWorld();
     void setOrientationLabels(const char *const plusLabels[3], const char *const minusLabels[3]);
     void updateModelBoundsGuide(const double surfaceBounds[6]);
     void clearVolumeBoundsGuide();
+    void removeMultiStructurePreview(bool restoreNormalMask);
+    bool visibleMultiStructureBounds(double bounds[6]) const;
+    void updateMultiStructureBoundsGuide();
+    void clearMultiStructureBoundsGuide();
     void clearVolumeGeometry();
+    void createPositionPlaneActors();
+    bool setNiftiReviewVolumeGeometry(const NiftiVolumeGeometry &geometry,
+                                      QString *errorMessage);
     void setPositionPlaneSlice(int axis, int index);
     void setPositionPlaneVisible(int axis, bool visible);
     void updatePositionPlaneGeometry(int axis);
@@ -90,6 +143,9 @@ private:
     void updatePositionPlaneMaskIntersection(int axis);
     void updateAllPositionPlaneMaskIntersections();
     void clearPositionPlaneMaskIntersections();
+    void updatePositionPlaneCategoricalIntersections(int axis);
+    void updateAllPositionPlaneCategoricalIntersections();
+    int categoricalValueAtCtIndex(const std::array<double, 3> &ctIndex) const;
     void updatePositionPlaneVisibility();
     bool volumeGeometryMatchesMask(const MaskVolume &mask) const;
     std::array<double, 3> indexToWorld(const std::array<double, 3> &index) const;
@@ -103,6 +159,9 @@ private:
     vtkSmartPointer<vtkAnnotatedCubeActor> m_orientationCube;
     vtkSmartPointer<vtkOrientationMarkerWidget> m_orientationMarker;
     vtkSmartPointer<vtkActor> m_boundsActor;
+    vtkSmartPointer<vtkActor> m_multiStructureBoundsActor;
+    MultiStructureVolume m_multiStructureVolume;
+    std::vector<MultiStructureSurface> m_multiStructureSurfaces;
     std::array<vtkSmartPointer<vtkPlaneSource>, 3> m_positionPlaneSources;
     std::array<vtkSmartPointer<vtkPolyDataMapper>, 3> m_positionPlaneFillMappers;
     std::array<vtkSmartPointer<vtkActor>, 3> m_positionPlaneFillActors;
@@ -128,6 +187,8 @@ private:
     bool m_hasVolumeGeometry = false;
     bool m_volumeMaskGeometryAligned = false;
     bool m_hasIntersectionMask = false;
+    bool m_multiStructurePreviewActive = false;
+    bool m_niftiReviewGeometryActive = false;
     double m_surfaceOpacity = 0.9;
     bool m_leftButtonDown = false;
     bool m_middleButtonDown = false;

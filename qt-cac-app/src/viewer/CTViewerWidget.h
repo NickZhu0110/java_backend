@@ -14,6 +14,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QColor>
 #include <QWidget>
 
 #include <QDateTime>
@@ -23,6 +24,7 @@
 #include <vector>
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
+#include "viewer/MultiStructureVolume.h"
 
 class Mask3DViewerWidget;
 class QGridLayout;
@@ -36,11 +38,15 @@ public:
     void loadVolumeFromLocalPath(const QString &path);
     void loadMaskFromLocalPath(const QString &path);
     void loadJobFilesFromCache(const QString &caseCacheDir);
+    bool loadMultiStructurePreview(const QString &ctPath,
+                                   const QString &segmentationPath,
+                                   QString *errorMessage = nullptr);
     bool hasUnsavedEdits() const;
     bool saveCorrectedMask();
 
 signals:
     void correctedMaskSaved(int version, const QString &rawPath, const QString &metadataPath);
+    void niftiReviewModeChanged(bool active);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -105,6 +111,15 @@ private:
         QSizeF sceneSizeMm;
         QSizeF itemScaleMmPerPixel;
         double displaySpacingMm = 1.0;
+    };
+
+    struct MultiStructureControl
+    {
+        int labelValue = 0;
+        QColor color;
+        QCheckBox *visibilityCheckBox = nullptr;
+        QSlider *opacitySlider = nullptr;
+        QLabel *opacityLabel = nullptr;
     };
 
     class GraphicsView : public QGraphicsView
@@ -179,6 +194,18 @@ private:
     void updateGlobalZoomLabel();
     void refresh3DMaskSurface();
     void refresh3DMaskIntersections(const EditOperation &operation);
+    void chooseMultiStructureFiles();
+    bool activateNiftiReview(MultiStructureVolume volume,
+                             const QString &segmentationPath,
+                             QString *errorMessage);
+    void rebuildMultiStructureControls();
+    void clearMultiStructureControls();
+    void setMultiStructurePreviewUiActive(bool active);
+    void configureNiftiReviewMpr();
+    void leaveNiftiReviewMode();
+    bool displayVolumeValid() const;
+    std::array<int, 3> displayVolumeDimensions() const;
+    double displayCtValue(int x, int y, int z) const;
     void configure3DPositionPlanes();
     void update3DPlaneSlice(ViewOrientation orientation, int sliceIndex);
     void handleViewWheel(ViewOrientation orientation, QWheelEvent *event);
@@ -207,10 +234,13 @@ private:
     void setMaskEditDirty(bool dirty);
     void updateMaskStatusLabel();
     QImage renderCtSlice(ViewOrientation orientation, int sliceIndex) const;
+    QImage renderNiftiCategoricalOverlay(ViewOrientation orientation,
+                                         int sliceIndex) const;
     QImage renderMaskOverlay(ViewOrientation orientation, int sliceIndex, const MaskVolume &mask, const QColor &color, double opacity) const;
     QImage renderMaskDiffOverlay(ViewOrientation orientation, int sliceIndex) const;
     bool scenePointToVoxelContinuous(ViewOrientation orientation, const QPointF &scenePos, int sliceIndex, double *x, double *y, double *z) const;
-    int16_t sampleCtLinear(double x, double y, double z) const;
+    double sampleCtLinear(double x, double y, double z) const;
+    int sampleNiftiCategoricalNearest(double ctX, double ctY, double ctZ) const;
     uint8_t sampleMaskNearest(const MaskVolume &mask, double x, double y, double z) const;
 
     std::array<ViewPanel, 3> m_viewPanels;
@@ -223,6 +253,7 @@ private:
     QPushButton *m_fitAllButton = nullptr;
     QPushButton *m_refresh3DButton = nullptr;
     QPushButton *m_reset3DCameraButton = nullptr;
+    QPushButton *m_loadMultiStructureButton = nullptr;
     QSpinBox *m_brushRadiusSpinBox = nullptr;
     QCheckBox *m_showAiMaskCheckBox = nullptr;
     QCheckBox *m_showWorkingMaskCheckBox = nullptr;
@@ -236,6 +267,10 @@ private:
     QCheckBox *m_showCoronal3DPlaneCheckBox = nullptr;
     QCheckBox *m_showSagittal3DPlaneCheckBox = nullptr;
     QCheckBox *m_move3DPlanesCheckBox = nullptr;
+    QWidget *m_multiStructureControlsWidget = nullptr;
+    QGridLayout *m_multiStructureControlsLayout = nullptr;
+    QLabel *m_multiStructureStatusLabel = nullptr;
+    std::vector<MultiStructureControl> m_multiStructureControls;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
     QWidget *m_threeDPanel = nullptr;
@@ -251,6 +286,12 @@ private:
     bool m_hasWorkingMask = false;
     bool m_hasUnsavedMaskEdits = false;
     bool m_usingSyntheticFallback = true;
+    bool m_multiStructurePreviewUiActive = false;
+    MultiStructureVolume m_niftiReviewVolume;
+    std::array<int, 3> m_normalSliceIndicesBeforeNifti = {0, 0, 0};
+    ToolMode m_toolModeBeforeMultiStructure = ToolMode::ViewPan;
+    bool m_move3DPlanesWasCheckedBeforeMultiStructure = false;
+    std::array<bool, 3> m_planeVisibilityBeforeMultiStructure = {false, false, true};
     bool m_isBrushDragging = false;
     bool m_hasLastBrushPoint = false;
     ViewOrientation m_activeBrushOrientation = ViewOrientation::Axial;

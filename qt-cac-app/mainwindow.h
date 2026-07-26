@@ -37,6 +37,8 @@ private:
     void resetForm();
     void setAdvancedOverridesEnabled(bool enabled);
     void setBackendConnected(bool connected, const QString &statusText);
+    void setJobInProgress(bool inProgress);
+    void setNiftiReviewModeActive(bool active);
     void updateSubmitButton();
     QString selectedDeviceValue() const;
     void browseDirectory(QLineEdit *lineEdit);
@@ -64,5 +66,9 @@ private:
     QString m_pendingCorrectedMaskMetadataPath;
     int m_pendingCorrectedMaskVersion;
     bool m_backendConnected;
+    bool m_jobInProgress;
+    bool m_niftiReviewActive;
+    bool m_caseCacheLoadDeferredDuringNiftiReview;
+    qint64 m_scoreRecalculationDeferredJobId;
 };
 #endif // MAINWINDOW_H

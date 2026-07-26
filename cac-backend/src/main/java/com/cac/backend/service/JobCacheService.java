@@ -1,10 +1,16 @@
 package com.cac.backend.service;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 @Service
-public class JobCacheService {
+@ConditionalOnProperty(
+        name = "cac.status-cache.mode",
+        havingValue = "redis",
+        matchIfMissing = true
+)
+public class JobCacheService implements JobStatusCache {
 
     private final StringRedisTemplate redisTemplate;
 
@@ -12,6 +18,7 @@ public class JobCacheService {
         this.redisTemplate = redisTemplate;
     }
 
+    @Override
     public void saveJobStatus(Long jobId, String status, Integer progress) {
         redisTemplate.opsForValue().set("job:" + jobId + ":status", status);
 

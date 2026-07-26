@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.1.2+cpu
+numpy==1.26.3
+SimpleITK==2.3.1
+scipy==1.11.4
+scikit-image==0.24.0

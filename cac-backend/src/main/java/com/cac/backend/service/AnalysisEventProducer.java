@@ -4,11 +4,17 @@ import com.cac.backend.dto.AnalysisRequestedEvent;
 import com.cac.backend.entity.AnalysisJob;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
-public class AnalysisEventProducer {
+@ConditionalOnProperty(
+        name = "cac.execution.mode",
+        havingValue = "kafka",
+        matchIfMissing = true
+)
+public class AnalysisEventProducer implements AnalysisDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisEventProducer.class);
 
@@ -18,6 +24,11 @@ public class AnalysisEventProducer {
 
     public AnalysisEventProducer(KafkaTemplate<String, AnalysisRequestedEvent> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
+    }
+
+    @Override
+    public void dispatch(AnalysisJob job, com.cac.backend.dto.CreateJobRequest request) {
+        publishAnalysisRequested(job);
     }
 
     public void publishAnalysisRequested(AnalysisJob job) {

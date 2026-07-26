@@ -1,0 +1,56 @@
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+
+  datasource:
+    url: jdbc:h2:file:${CAC_DATA_ROOT:./local-data}/db/cac;DB_CLOSE_ON_EXIT=FALSE;AUTO_SERVER=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration-local
+    baseline-on-migrate: false
+    clean-disabled: true
+
+  h2:
+    console:
+      enabled: false
+
+server:
+  address: 127.0.0.1
+  port: ${CAC_BACKEND_PORT:6006}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+cac:
+  execution:
+    mode: local
+  status-cache:
+    mode: none
+  storage:
+    root: ${CAC_DATA_ROOT:./local-data}
+  local-analysis:
+    python-executable: ${CAC_PYTHON_EXECUTABLE:}
+    cli-path: ${CAC_LOCAL_CLI_PATH:}
+    segment-cacs-root: ${SEGMENT_CACS_ROOT:}
+    model-path: ${SEGMENT_CACS_MODEL_PATH:}
+    timeout: ${CAC_INFERENCE_TIMEOUT:PT2H}
+  recalculate:
+    python-executable: ${CAC_PYTHON_EXECUTABLE:}
+    script-path: ${CAC_RECALCULATE_SCRIPT_PATH:}
+    segmentcacs-src: ${SEGMENT_CACS_ROOT:}
+
+logging:
+  file:
+    name: ${CAC_DATA_ROOT:./local-data}/logs/backend.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n"

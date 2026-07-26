@@ -18,6 +18,8 @@ public class CacResultResponse {
 
     private String resultJsonPath;
 
+    private String ctVolumePath;
+
     private String aiMaskPath;
 
     private String correctedMaskPath;

@@ -75,6 +75,7 @@ public class CacResultService {
         result.setAgatstonScore(request.getAgatstonScore());
         result.setRiskGrade(request.getRiskGrade());
         result.setResultJsonPath(request.getResultJsonPath());
+        result.setCtVolumePath(request.getCtVolumePath());
         result.setAiMaskPath(request.getAiMaskPath());
         result.setCorrectedMaskPath(request.getCorrectedMaskPath());
         result.setReportPath(request.getReportPath());
@@ -105,11 +106,11 @@ public class CacResultService {
 
     public Resource loadAiMaskResource(Long jobId) {
         AnalysisJob job = ensureJobExists(jobId);
-        if (!"SUCCESS".equals(job.getStatus())) {
+        if (!isSuccessfulStatus(job.getStatus())) {
             log.warn("AI mask download rejected: jobId={}, status={}", jobId, job.getStatus());
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
-                    "AI mask is available only after job SUCCESS. Current status: " + job.getStatus()
+                    "AI mask is available only after job completion. Current status: " + job.getStatus()
             );
         }
 
@@ -151,6 +152,19 @@ public class CacResultService {
 
     public Path resolveInputVolumePath(Long jobId) {
         AnalysisJob job = ensureJobExists(jobId);
+        CacResult result = findByJobId(jobId);
+        if (result != null
+                && result.getCtVolumePath() != null
+                && !result.getCtVolumePath().isBlank()) {
+            Path ctPath = Paths.get(result.getCtVolumePath()).toAbsolutePath().normalize();
+            if (!Files.isRegularFile(ctPath) || !Files.isReadable(ctPath)) {
+                throw new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Generated CT volume is not readable for job: " + jobId
+                );
+            }
+            return ctPath;
+        }
         if (job.getInputPath() == null || job.getInputPath().isBlank()) {
             log.warn("Input volume download failed: jobId={}, inputPath missing", jobId);
             throw new ResponseStatusException(
@@ -493,6 +507,7 @@ public class CacResultService {
         response.setAgatstonScore(result.getAgatstonScore());
         response.setRiskGrade(result.getRiskGrade());
         response.setResultJsonPath(result.getResultJsonPath());
+        response.setCtVolumePath(result.getCtVolumePath());
         response.setAiMaskPath(result.getAiMaskPath());
         response.setCorrectedMaskPath(result.getCorrectedMaskPath());
         response.setCorrectedAgatstonScore(result.getCorrectedAgatstonScore());
@@ -503,5 +518,9 @@ public class CacResultService {
         response.setCreatedAt(result.getCreatedAt());
         response.setUpdatedAt(result.getUpdatedAt());
         return response;
+    }
+
+    private boolean isSuccessfulStatus(String status) {
+        return "SUCCESS".equals(status) || "COMPLETED".equals(status);
     }
 }

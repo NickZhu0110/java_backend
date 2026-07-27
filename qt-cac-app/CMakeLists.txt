@@ -57,6 +57,8 @@ qt_add_executable(qt-cac-app
     src/viewer/MultiStructureNiftiLoader.cpp
     src/viewer/MultiStructureNiftiLoader.h
     src/viewer/MultiStructureVolume.h
+    src/viewer/NiftiVesselSelectionState.cpp
+    src/viewer/NiftiVesselSelectionState.h
     src/viewer/PythonSimpleItkPreprocessor.cpp
     src/viewer/PythonSimpleItkPreprocessor.h
     src/viewer/RawVolumeLoader.cpp

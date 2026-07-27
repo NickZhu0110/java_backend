@@ -80,8 +80,8 @@ public:
     void setMultiStructureOpacity(int labelValue, double opacity);
     const vtkImageData *activeNiftiCtImage() const;
     const NiftiVolumeGeometry *activeNiftiCtGeometry() const;
-    const vtkImageData *activeNiftiLabel2000Mask() const;
-    const vtkPolyData *activeNiftiLabel2000Surface() const;
+    const vtkImageData *activeNiftiSegmentationImage() const;
+    const vtkPolyData *activeNiftiSurfaceForLabel(int labelValue) const;
     const vtkMatrix4x4 *activeNiftiSegmentationToCtIndexTransform() const;
     const vtkMatrix4x4 *activeNiftiSegmentationToCtPhysicalTransform() const;
 

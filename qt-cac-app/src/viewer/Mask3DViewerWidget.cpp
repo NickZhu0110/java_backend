@@ -2318,20 +2318,20 @@ const NiftiVolumeGeometry *Mask3DViewerWidget::activeNiftiCtGeometry() const
                                          : nullptr;
 }
 
-const vtkImageData *Mask3DViewerWidget::activeNiftiLabel2000Mask() const
+const vtkImageData *Mask3DViewerWidget::activeNiftiSegmentationImage() const
 {
     return m_multiStructurePreviewActive
-        ? m_multiStructureVolume.label2000BinaryImage.GetPointer()
+        ? m_multiStructureVolume.segmentationImage.GetPointer()
         : nullptr;
 }
 
-const vtkPolyData *Mask3DViewerWidget::activeNiftiLabel2000Surface() const
+const vtkPolyData *Mask3DViewerWidget::activeNiftiSurfaceForLabel(int labelValue) const
 {
     if (!m_multiStructurePreviewActive) {
         return nullptr;
     }
     for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
-        if (surface.label.value == 2000) {
+        if (surface.label.value == labelValue) {
             return surface.polyData;
         }
     }

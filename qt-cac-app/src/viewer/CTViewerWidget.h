@@ -15,6 +15,7 @@
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
 #include <QWidget>
 
 #include <QDateTime>
@@ -25,6 +26,7 @@
 #include "data/MaskVolume.h"
 #include "data/VolumeData.h"
 #include "viewer/MultiStructureVolume.h"
+#include "viewer/NiftiVesselSelectionState.h"
 
 class Mask3DViewerWidget;
 class QGridLayout;
@@ -43,10 +45,14 @@ public:
                                    QString *errorMessage = nullptr);
     bool hasUnsavedEdits() const;
     bool saveCorrectedMask();
+    bool hasSelectedVesselLabel() const;
+    int selectedVesselLabel() const;
+    const NiftiVesselSelectionState &niftiVesselSelectionState() const;
 
 signals:
     void correctedMaskSaved(int version, const QString &rawPath, const QString &metadataPath);
     void niftiReviewModeChanged(bool active);
+    void vesselLabelSelectionChanged(bool valid, int labelValue);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -200,6 +206,8 @@ private:
                              QString *errorMessage);
     void rebuildMultiStructureControls();
     void clearMultiStructureControls();
+    void handleVesselLabelSelection(int comboBoxIndex);
+    void updateVesselSelectionUi(const QString &selectionError = QString());
     void setMultiStructurePreviewUiActive(bool active);
     void configureNiftiReviewMpr();
     void leaveNiftiReviewMode();
@@ -270,6 +278,10 @@ private:
     QWidget *m_multiStructureControlsWidget = nullptr;
     QGridLayout *m_multiStructureControlsLayout = nullptr;
     QLabel *m_multiStructureStatusLabel = nullptr;
+    QWidget *m_vesselSelectionWidget = nullptr;
+    QComboBox *m_vesselLabelComboBox = nullptr;
+    QLabel *m_vesselSelectionStatusLabel = nullptr;
+    QPushButton *m_straightenSelectedVesselButton = nullptr;
     std::vector<MultiStructureControl> m_multiStructureControls;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;
@@ -288,6 +300,7 @@ private:
     bool m_usingSyntheticFallback = false;
     bool m_multiStructurePreviewUiActive = false;
     MultiStructureVolume m_niftiReviewVolume;
+    NiftiVesselSelectionState m_niftiVesselSelectionState;
     std::array<int, 3> m_normalSliceIndicesBeforeNifti = {0, 0, 0};
     ToolMode m_toolModeBeforeMultiStructure = ToolMode::ViewPan;
     bool m_move3DPlanesWasCheckedBeforeMultiStructure = false;

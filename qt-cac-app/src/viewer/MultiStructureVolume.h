@@ -54,9 +54,6 @@ struct MultiStructureVolume
     double ctRescaleSlope = 1.0;
     double ctRescaleIntercept = 0.0;
     vtkSmartPointer<vtkImageData> segmentationImage;
-    // Independent uint8 view of label 2000 on the native segmentation grid.
-    // It never aliases or modifies segmentationImage.
-    vtkSmartPointer<vtkImageData> label2000BinaryImage;
     vtkSmartPointer<vtkMatrix4x4> ctIndexToSegmentationIndex;
     vtkSmartPointer<vtkMatrix4x4> segmentationIndexToCtIndex;
     // Maps vtkImageData physical coordinates from the segmentation data space
@@ -71,7 +68,6 @@ struct MultiStructureVolume
             && ctGeometry.dimensions[1] > 0
             && ctGeometry.dimensions[2] > 0
             && segmentationImage != nullptr
-            && label2000BinaryImage != nullptr
             && ctIndexToSegmentationIndex != nullptr
             && segmentationIndexToCtIndex != nullptr
             && segmentationDataToCtData != nullptr

@@ -7,6 +7,7 @@
 #include <QButtonGroup>
 #include <QBrush>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCursor>
 #include <QCoreApplication>
 #include <QDir>
@@ -33,6 +34,7 @@
 #include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -166,7 +168,9 @@ bool CTViewerWidget::activateNiftiReview(
             panel(ViewOrientation::Axial).sliceIndex
         };
     }
+    m_niftiVesselSelectionState.clear();
     m_niftiReviewVolume = std::move(loadedVolume);
+    m_niftiVesselSelectionState.setCurrentVolume(&m_niftiReviewVolume);
     rebuildMultiStructureControls();
     setMultiStructurePreviewUiActive(true);
     configureNiftiReviewMpr();
@@ -181,6 +185,21 @@ bool CTViewerWidget::activateNiftiReview(
 bool CTViewerWidget::hasUnsavedEdits() const
 {
     return m_hasUnsavedMaskEdits;
+}
+
+bool CTViewerWidget::hasSelectedVesselLabel() const
+{
+    return m_niftiVesselSelectionState.hasSelectedVesselLabel();
+}
+
+int CTViewerWidget::selectedVesselLabel() const
+{
+    return m_niftiVesselSelectionState.selectedVesselLabel();
+}
+
+const NiftiVesselSelectionState &CTViewerWidget::niftiVesselSelectionState() const
+{
+    return m_niftiVesselSelectionState;
 }
 
 bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
@@ -641,6 +660,34 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_multiStructureStatusLabel = new QLabel(container);
     m_multiStructureStatusLabel->setWordWrap(true);
     m_multiStructureStatusLabel->setVisible(false);
+
+    m_vesselSelectionWidget = new QWidget(container);
+    auto *vesselSelectionLayout = new QVBoxLayout(m_vesselSelectionWidget);
+    vesselSelectionLayout->setContentsMargins(4, 0, 4, 0);
+    vesselSelectionLayout->setSpacing(2);
+    auto *vesselSelectorRow = new QHBoxLayout;
+    vesselSelectorRow->setContentsMargins(0, 0, 0, 0);
+    vesselSelectorRow->setSpacing(6);
+    vesselSelectorRow->addWidget(
+        new QLabel(QStringLiteral("Vessel label:"), m_vesselSelectionWidget));
+    m_vesselLabelComboBox = new QComboBox(m_vesselSelectionWidget);
+    m_vesselLabelComboBox->setEditable(false);
+    m_vesselLabelComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_vesselLabelComboBox->addItem(QStringLiteral("Select a label..."));
+    vesselSelectorRow->addWidget(m_vesselLabelComboBox, 1);
+    m_straightenSelectedVesselButton = new QPushButton(
+        QStringLiteral("Straighten Selected Vessel"), m_vesselSelectionWidget);
+    m_straightenSelectedVesselButton->setEnabled(false);
+    m_straightenSelectedVesselButton->setToolTip(
+        QStringLiteral("Vessel straightening will be implemented next"));
+    vesselSelectorRow->addWidget(m_straightenSelectedVesselButton);
+    vesselSelectionLayout->addLayout(vesselSelectorRow);
+    m_vesselSelectionStatusLabel = new QLabel(
+        QStringLiteral("No vessel label selected."), m_vesselSelectionWidget);
+    m_vesselSelectionStatusLabel->setWordWrap(true);
+    vesselSelectionLayout->addWidget(m_vesselSelectionStatusLabel);
+    m_vesselSelectionWidget->setVisible(false);
+
     m_multiStructureControlsWidget = new QWidget(container);
     m_multiStructureControlsLayout = new QGridLayout(m_multiStructureControlsWidget);
     m_multiStructureControlsLayout->setContentsMargins(4, 0, 4, 0);
@@ -690,6 +737,18 @@ QWidget *CTViewerWidget::create3DPanelWidget()
             m_mask3DViewer, &Mask3DViewerWidget::setSagittalPlaneVisible);
     connect(m_move3DPlanesCheckBox, &QCheckBox::toggled,
             m_mask3DViewer, &Mask3DViewerWidget::setMovePlanesEnabled);
+    connect(m_vesselLabelComboBox,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            &CTViewerWidget::handleVesselLabelSelection);
+    connect(m_straightenSelectedVesselButton, &QPushButton::clicked,
+            this, [this]() {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Straighten Selected Vessel"),
+            QStringLiteral("Vessel straightening will be implemented next. "
+                           "No centerline or output has been created."));
+    });
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(4, 4, 4, 4);
@@ -698,6 +757,7 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     layout->addWidget(m_mask3DViewer, 1);
     layout->addLayout(opacityLayout);
     layout->addWidget(m_multiStructureStatusLabel);
+    layout->addWidget(m_vesselSelectionWidget);
     layout->addWidget(m_multiStructureControlsWidget);
     return container;
 }
@@ -1318,6 +1378,20 @@ void CTViewerWidget::chooseMultiStructureFiles()
 void CTViewerWidget::rebuildMultiStructureControls()
 {
     clearMultiStructureControls();
+    if (m_vesselLabelComboBox) {
+        QSignalBlocker blocker(m_vesselLabelComboBox);
+        m_vesselLabelComboBox->clear();
+        m_vesselLabelComboBox->addItem(QStringLiteral("Select a label..."));
+        for (const MultiStructureLabelInfo &label : m_niftiReviewVolume.labels) {
+            m_vesselLabelComboBox->addItem(
+                QStringLiteral("Label %1 — %2 voxels")
+                    .arg(label.value)
+                    .arg(label.voxelCount),
+                label.value);
+        }
+        m_vesselLabelComboBox->setCurrentIndex(0);
+    }
+    updateVesselSelectionUi();
     if (!m_mask3DViewer || !m_multiStructureControlsLayout) {
         return;
     }
@@ -1407,6 +1481,94 @@ void CTViewerWidget::clearMultiStructureControls()
     }
 }
 
+void CTViewerWidget::handleVesselLabelSelection(int comboBoxIndex)
+{
+    if (!m_multiStructurePreviewUiActive || !m_vesselLabelComboBox
+        || comboBoxIndex <= 0) {
+        m_niftiVesselSelectionState.clearSelection();
+        updateVesselSelectionUi();
+        return;
+    }
+
+    bool labelValueValid = false;
+    const int labelValue =
+        m_vesselLabelComboBox->itemData(comboBoxIndex).toInt(&labelValueValid);
+    if (!labelValueValid || !m_mask3DViewer) {
+        m_niftiVesselSelectionState.clearSelection();
+        updateVesselSelectionUi(QStringLiteral(
+            "The selected entry is not a detected label in the current dataset."));
+        return;
+    }
+
+    const vtkPolyData *surface =
+        m_mask3DViewer->activeNiftiSurfaceForLabel(labelValue);
+    QString selectionError;
+    if (!m_niftiVesselSelectionState.selectLabel(
+            labelValue, surface, &selectionError)) {
+        QSignalBlocker blocker(m_vesselLabelComboBox);
+        m_vesselLabelComboBox->setCurrentIndex(0);
+        updateVesselSelectionUi(selectionError);
+        return;
+    }
+
+    updateVesselSelectionUi();
+}
+
+void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
+{
+    const bool valid =
+        m_niftiVesselSelectionState.selectionUsableForProcessing();
+    if (m_straightenSelectedVesselButton) {
+        m_straightenSelectedVesselButton->setEnabled(valid);
+    }
+
+    if (m_vesselSelectionStatusLabel) {
+        if (!selectionError.isEmpty()) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral("Vessel label selection is invalid: %1")
+                    .arg(selectionError));
+        } else if (!valid) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral("No vessel label selected."));
+        } else {
+            const NiftiVesselLabelValidation *validation =
+                m_niftiVesselSelectionState.validation();
+            QStringList bounds;
+            for (double value : validation->physicalBoundsRasMm) {
+                bounds << QString::number(value, 'f', 2);
+            }
+            QString status = QStringLiteral(
+                "Selected vessel label: %1 | voxels: %2 | components: %3 | "
+                "largest component: %4 voxels | RAS bounds mm: [%5] | "
+                "CT/seg geometry: compatible")
+                                 .arg(validation->labelValue)
+                                 .arg(validation->foregroundVoxelCount)
+                                 .arg(validation->connectedComponentCount)
+                                 .arg(validation->largestConnectedComponentVoxelCount)
+                                 .arg(bounds.join(QStringLiteral(", ")));
+            if (!validation->warning.isEmpty()) {
+                status += QStringLiteral("\nWarning: %1").arg(validation->warning);
+            }
+            m_vesselSelectionStatusLabel->setText(status);
+            qInfo() << "Selected NIfTI vessel label"
+                    << validation->labelValue
+                    << "voxels=" << validation->foregroundVoxelCount
+                    << "components=" << validation->connectedComponentCount
+                    << "largest component voxels="
+                    << validation->largestConnectedComponentVoxelCount
+                    << "RAS bounds mm=" << bounds.join(QStringLiteral(", "))
+                    << "geometry compatible=" << validation->geometryCompatible;
+            if (!validation->warning.isEmpty()) {
+                qWarning().noquote() << validation->warning;
+            }
+        }
+    }
+
+    emit vesselLabelSelectionChanged(
+        valid,
+        valid ? m_niftiVesselSelectionState.selectedVesselLabel() : 0);
+}
+
 void CTViewerWidget::setMultiStructurePreviewUiActive(bool active)
 {
     const bool wasActive = m_multiStructurePreviewUiActive;
@@ -1441,6 +1603,9 @@ void CTViewerWidget::setMultiStructurePreviewUiActive(bool active)
     }
     if (m_multiStructureControlsWidget) {
         m_multiStructureControlsWidget->setVisible(active);
+    }
+    if (m_vesselSelectionWidget) {
+        m_vesselSelectionWidget->setVisible(active);
     }
     if (m_multiStructureStatusLabel) {
         m_multiStructureStatusLabel->setVisible(active);
@@ -1565,6 +1730,7 @@ void CTViewerWidget::leaveNiftiReviewMode()
 
     finishBrushStroke();
     hideBrushCursor();
+    m_niftiVesselSelectionState.clear();
     if (m_mask3DViewer) {
         m_mask3DViewer->clearMultiStructurePreview();
     }

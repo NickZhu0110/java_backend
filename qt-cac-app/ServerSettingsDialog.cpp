@@ -66,10 +66,20 @@ QString ServerSettingsDialog::webSocketUrl() const
 void ServerSettingsDialog::loadSettings()
 {
     QSettings settings;
-    ui->backendUrlLineEdit->setText(settings.value(QStringLiteral("server/backendUrl"),
-                                                   QStringLiteral("http://127.0.0.1:6006")).toString());
-    ui->webSocketUrlLineEdit->setText(settings.value(QStringLiteral("server/webSocketUrl"),
-                                                     QStringLiteral("ws://127.0.0.1:6006/ws/jobs")).toString());
+    QString configuredBackendUrl = qEnvironmentVariable("CAC_BACKEND_URL").trimmed();
+    if (configuredBackendUrl.isEmpty()) {
+        configuredBackendUrl = settings.value(
+            QStringLiteral("server/backendUrl"),
+            QStringLiteral("http://127.0.0.1:6006")).toString();
+    }
+    QString configuredWebSocketUrl = qEnvironmentVariable("CAC_WEBSOCKET_URL").trimmed();
+    if (configuredWebSocketUrl.isEmpty()) {
+        configuredWebSocketUrl = settings.value(
+            QStringLiteral("server/webSocketUrl"),
+            QStringLiteral("ws://127.0.0.1:6006/ws/jobs")).toString();
+    }
+    ui->backendUrlLineEdit->setText(configuredBackendUrl);
+    ui->webSocketUrlLineEdit->setText(configuredWebSocketUrl);
     ui->sshHostLineEdit->setText(settings.value(QStringLiteral("ssh/host")).toString());
     ui->sshPortSpinBox->setValue(settings.value(QStringLiteral("ssh/port"), 22).toInt());
     ui->sshUsernameLineEdit->setText(settings.value(QStringLiteral("ssh/username")).toString());

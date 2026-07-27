@@ -17,15 +17,13 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <vector>
 
 namespace {
 
 constexpr double kMatrixTolerance = 1e-5;
 constexpr double kMinimumAffineDeterminant = 1e-12;
-constexpr int kVesselLabelValue = 2000;
-constexpr std::array<int, 3> kExpectedLabelValues = {1000, 2000, 3000};
-static_assert(kExpectedLabelValues[1] == kVesselLabelValue);
 
 struct LabelAccumulator
 {
@@ -269,67 +267,43 @@ bool geometriesSharePhysicalSpace(const NiftiVolumeGeometry &ct,
     return true;
 }
 
-int expectedLabelIndex(std::int64_t value)
-{
-    for (size_t index = 0; index < kExpectedLabelValues.size(); ++index) {
-        if (value == kExpectedLabelValues[index]) {
-            return static_cast<int>(index);
-        }
-    }
-    return -1;
-}
-
 template<typename T>
-bool collectLabelsAndVesselMaskTyped(
+bool collectLabelsTyped(
     vtkImageData *image,
     const NiftiVolumeGeometry &geometry,
     std::vector<MultiStructureLabelInfo> *labels,
-    vtkSmartPointer<vtkImageData> *label2000BinaryImage,
     QString *errorMessage)
 {
     vtkDataArray *scalars = image->GetPointData()->GetScalars();
     const auto *values = static_cast<const T *>(scalars->GetVoidPointer(0));
     const std::uint64_t voxelCount = geometry.voxelCount;
-
-    auto binaryImage = vtkSmartPointer<vtkImageData>::New();
-    binaryImage->CopyStructure(image);
-    binaryImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-    vtkDataArray *binaryScalars = binaryImage->GetPointData()->GetScalars();
-    auto *binaryValues = binaryScalars
-        ? static_cast<unsigned char *>(binaryScalars->GetVoidPointer(0))
-        : nullptr;
-    if (!values || !binaryValues || voxelCount == 0) {
+    if (!values || voxelCount == 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("Segmentation scalar buffer is empty.");
         }
         return false;
     }
 
-    std::array<LabelAccumulator, kExpectedLabelValues.size()> accumulators;
+    std::map<int, LabelAccumulator> accumulators;
     std::uint64_t offset = 0;
     for (int z = 0; z < geometry.dimensions[2]; ++z) {
         for (int y = 0; y < geometry.dimensions[1]; ++y) {
             for (int x = 0; x < geometry.dimensions[0]; ++x, ++offset) {
                 const auto value = static_cast<std::int64_t>(values[offset]);
                 if (value == 0) {
-                    binaryValues[offset] = 0;
                     continue;
                 }
-
-                const int labelIndex = expectedLabelIndex(value);
-                if (labelIndex < 0) {
+                if (value < std::numeric_limits<int>::min()
+                    || value > std::numeric_limits<int>::max()) {
                     if (errorMessage) {
                         *errorMessage = QStringLiteral(
-                            "Segmentation contains unexpected nonzero label %1; "
-                            "expected exactly 1000, 2000 and 3000.")
+                            "Segmentation label %1 is outside the supported 32-bit integer range.")
                                             .arg(value);
                     }
                     return false;
                 }
 
-                binaryValues[offset] = value == kVesselLabelValue ? 1 : 0;
-                LabelAccumulator &accumulator =
-                    accumulators[static_cast<size_t>(labelIndex)];
+                LabelAccumulator &accumulator = accumulators[static_cast<int>(value)];
                 ++accumulator.count;
                 accumulator.minX = std::min(accumulator.minX, x);
                 accumulator.maxX = std::max(accumulator.maxX, x);
@@ -341,22 +315,20 @@ bool collectLabelsAndVesselMaskTyped(
         }
     }
 
-    std::vector<MultiStructureLabelInfo> collectedLabels;
-    collectedLabels.reserve(kExpectedLabelValues.size());
-    for (size_t index = 0; index < kExpectedLabelValues.size(); ++index) {
-        const LabelAccumulator &accumulator = accumulators[index];
-        if (accumulator.count == 0) {
-            if (errorMessage) {
-                *errorMessage = QStringLiteral(
-                    "Segmentation is missing required nonzero label %1; "
-                    "expected exactly 1000, 2000 and 3000.")
-                                    .arg(kExpectedLabelValues[index]);
-            }
-            return false;
+    if (accumulators.empty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Segmentation does not contain any nonzero categorical labels.");
         }
+        return false;
+    }
 
+    std::vector<MultiStructureLabelInfo> collectedLabels;
+    collectedLabels.reserve(accumulators.size());
+    size_t styleIndex = 0;
+    for (const auto &[labelValue, accumulator] : accumulators) {
         MultiStructureLabelInfo label;
-        label.value = kExpectedLabelValues[index];
+        label.value = labelValue;
         label.displayName = QStringLiteral("Label %1").arg(label.value);
         label.voxelCount = accumulator.count;
         label.indexBounds = {
@@ -367,26 +339,24 @@ bool collectLabelsAndVesselMaskTyped(
         label.physicalBoundsRasMm =
             transformedBounds(label.indexBounds, geometry);
         const NeutralLabelStyle &style =
-            kNeutralLabelStyles[index % kNeutralLabelStyles.size()];
+            kNeutralLabelStyles[styleIndex % kNeutralLabelStyles.size()];
         label.color = style.color;
         label.defaultOpacity = style.opacity;
         collectedLabels.push_back(label);
+        ++styleIndex;
     }
 
-    binaryScalars->Modified();
     *labels = std::move(collectedLabels);
-    *label2000BinaryImage = std::move(binaryImage);
     return true;
 }
 
-bool collectLabelsAndVesselMask(
+bool collectLabels(
     vtkImageData *image,
     const NiftiVolumeGeometry &geometry,
     std::vector<MultiStructureLabelInfo> *labels,
-    vtkSmartPointer<vtkImageData> *label2000BinaryImage,
     QString *errorMessage)
 {
-    if (!image || !labels || !label2000BinaryImage
+    if (!image || !labels
         || !image->GetPointData() || !image->GetPointData()->GetScalars()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral(
@@ -397,23 +367,17 @@ bool collectLabelsAndVesselMask(
 
     switch (image->GetScalarType()) {
     case VTK_SIGNED_CHAR:
-        return collectLabelsAndVesselMaskTyped<signed char>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<signed char>(image, geometry, labels, errorMessage);
     case VTK_UNSIGNED_CHAR:
-        return collectLabelsAndVesselMaskTyped<unsigned char>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<unsigned char>(image, geometry, labels, errorMessage);
     case VTK_SHORT:
-        return collectLabelsAndVesselMaskTyped<short>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<short>(image, geometry, labels, errorMessage);
     case VTK_UNSIGNED_SHORT:
-        return collectLabelsAndVesselMaskTyped<unsigned short>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<unsigned short>(image, geometry, labels, errorMessage);
     case VTK_INT:
-        return collectLabelsAndVesselMaskTyped<int>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<int>(image, geometry, labels, errorMessage);
     case VTK_UNSIGNED_INT:
-        return collectLabelsAndVesselMaskTyped<unsigned int>(
-            image, geometry, labels, label2000BinaryImage, errorMessage);
+        return collectLabelsTyped<unsigned int>(image, geometry, labels, errorMessage);
     default:
         if (errorMessage) {
             *errorMessage = QStringLiteral(
@@ -665,16 +629,13 @@ bool MultiStructureNiftiLoader::load(const QString &ctPath,
 
     QElapsedTimer categoricalScanTimer;
     categoricalScanTimer.start();
-    if (!collectLabelsAndVesselMask(candidate.segmentationImage,
-                                    candidate.segmentationGeometry,
-                                    &candidate.labels,
-                                    &candidate.label2000BinaryImage,
-                                    errorMessage)) {
+    if (!collectLabels(candidate.segmentationImage,
+                       candidate.segmentationGeometry,
+                       &candidate.labels,
+                       errorMessage)) {
         return false;
     }
     const qint64 categoricalScanMilliseconds = categoricalScanTimer.elapsed();
-    const std::uint64_t label2000ForegroundCount =
-        candidate.labels[1].voxelCount;
 
     qInfo() << "Loaded native multi-label NIfTI preview"
             << "CT=" << candidate.ctPath
@@ -687,7 +648,7 @@ bool MultiStructureNiftiLoader::load(const QString &ctPath,
             << candidate.segmentationGeometry.spacing[2]
             << "CT read ms=" << ctReadMilliseconds
             << "segmentation read ms=" << segmentationReadMilliseconds
-            << "categorical label/binary scan ms="
+            << "categorical label scan ms="
             << categoricalScanMilliseconds;
     qInfo() << "NIfTI CT scalar type=" << candidate.ctGeometry.scalarTypeName
             << "rescale slope/intercept="
@@ -700,8 +661,6 @@ bool MultiStructureNiftiLoader::load(const QString &ctPath,
             << matrixSummary(candidate.segmentationIndexToCtIndex);
     qInfo() << "NIfTI segmentation-data to CT-data physical transform:"
             << matrixSummary(candidate.segmentationDataToCtData);
-    qInfo() << "Created independent label" << kVesselLabelValue
-            << "binary image with foreground voxels=" << label2000ForegroundCount;
     for (const MultiStructureLabelInfo &label : candidate.labels) {
         qInfo() << label.displayName
                 << "voxels=" << label.voxelCount

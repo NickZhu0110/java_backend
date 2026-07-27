@@ -25,3 +25,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Stop-Local-CAC.p
 For Explorer use, double-click `Stop-Local-CAC.cmd` in the integration worktree root.
 
 The launcher validates the JAR, isolated Python, SEGMENT-CACS source, checkpoint, worker scripts, data directory, Java executable, and port 6006 before starting. Runtime state and logs are stored below `%LOCALAPPDATA%\CAC\data`; nothing is installed globally.
+
+## VMTK vessel straightening
+
+The read-only multi-structure NIfTI workflow uses a separate Python 3.10
+environment. It does not modify or import packages from the SEGMENT-CACS
+environment.
+
+The Qt client resolves these development defaults automatically:
+
+```text
+CAC_VMTK_PYTHON_EXECUTABLE=%LOCALAPPDATA%\CAC\vmtk-python\python.exe
+CAC_VESSEL_STRAIGHTENING_SCRIPT=<worktree>\python-worker\vessel_straightening\vmtk_straighten_vessel.py
+CAC_DATA_ROOT=%LOCALAPPDATA%\CAC\data
+```
+
+Override any value in the terminal before launching Qt when a development
+machine uses a different absolute path. Generated runs are written below:
+
+```text
+%CAC_DATA_ROOT%\vessel-straightening\dataset-<hash>\<run-id>\
+```
+
+No files are written beside the source NIfTI images. The VMTK process is local
+and does not use Spring Boot, H2, SEGMENT-CACS, Kafka, Redis, or Docker.

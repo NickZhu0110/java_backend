@@ -30,6 +30,9 @@
 
 class Mask3DViewerWidget;
 class QGridLayout;
+class QProgressBar;
+class StraightenedVesselWindow;
+class VesselStraighteningController;
 
 class CTViewerWidget : public QWidget
 {
@@ -47,12 +50,16 @@ public:
     bool saveCorrectedMask();
     bool hasSelectedVesselLabel() const;
     int selectedVesselLabel() const;
+    bool hasSelectedVesselComponent() const;
+    int selectedVesselComponent() const;
     const NiftiVesselSelectionState &niftiVesselSelectionState() const;
 
 signals:
     void correctedMaskSaved(int version, const QString &rawPath, const QString &metadataPath);
     void niftiReviewModeChanged(bool active);
     void vesselLabelSelectionChanged(bool valid, int labelValue);
+    void vesselComponentSelectionChanged(bool valid, int component);
+    void straightenSelectedVesselRequested();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -207,7 +214,17 @@ private:
     void rebuildMultiStructureControls();
     void clearMultiStructureControls();
     void handleVesselLabelSelection(int comboBoxIndex);
+    void handleVesselComponentSelection(int comboBoxIndex);
+    void rebuildVesselComponentSelector();
     void updateVesselSelectionUi(const QString &selectionError = QString());
+    void initializeVesselStraightening();
+    void startVesselAnalysis();
+    void startVesselPath(const QString &pathId);
+    void handleVesselCandidates(const QJsonArray &candidates);
+    void showStraightenedVesselResult(const QJsonObject &result);
+    bool displayCenterlineJson(const QString &path,
+                               QString *errorMessage = nullptr);
+    void invalidateVesselStraightening();
     void setMultiStructurePreviewUiActive(bool active);
     void configureNiftiReviewMpr();
     void leaveNiftiReviewMode();
@@ -280,8 +297,13 @@ private:
     QLabel *m_multiStructureStatusLabel = nullptr;
     QWidget *m_vesselSelectionWidget = nullptr;
     QComboBox *m_vesselLabelComboBox = nullptr;
+    QComboBox *m_vesselComponentComboBox = nullptr;
     QLabel *m_vesselSelectionStatusLabel = nullptr;
     QPushButton *m_straightenSelectedVesselButton = nullptr;
+    QProgressBar *m_vesselProgressBar = nullptr;
+    QPushButton *m_cancelVesselProcessingButton = nullptr;
+    VesselStraighteningController *m_vesselStraighteningController = nullptr;
+    StraightenedVesselWindow *m_straightenedVesselWindow = nullptr;
     std::vector<MultiStructureControl> m_multiStructureControls;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;

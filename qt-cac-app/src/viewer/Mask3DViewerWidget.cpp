@@ -37,6 +37,7 @@
 #include <vtkProperty.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
+#include <vtkSphereSource.h>
 
 #include <algorithm>
 #include <cmath>
@@ -2245,9 +2246,106 @@ void Mask3DViewerWidget::setMultiStructureOpacity(int labelValue, double opacity
     }
 }
 
+void Mask3DViewerWidget::setNiftiCenterline(
+    const std::vector<std::array<double, 3>> &pointsLpsMm)
+{
+    clearNiftiCenterline();
+    if (!m_multiStructurePreviewActive || pointsLpsMm.size() < 2) {
+        return;
+    }
+    vtkNew<vtkPoints> points;
+    for (const auto &pointLps : pointsLpsMm) {
+        // SimpleITK reports physical LPS; this viewer renders NIfTI in RAS.
+        points->InsertNextPoint(
+            -pointLps[0], -pointLps[1], pointLps[2]);
+    }
+    vtkNew<vtkPolyLine> line;
+    line->GetPointIds()->SetNumberOfIds(
+        static_cast<vtkIdType>(pointsLpsMm.size()));
+    for (vtkIdType index = 0;
+         index < static_cast<vtkIdType>(pointsLpsMm.size());
+         ++index) {
+        line->GetPointIds()->SetId(index, index);
+    }
+    vtkNew<vtkCellArray> lines;
+    lines->InsertNextCell(line);
+    m_niftiCenterlineData = vtkSmartPointer<vtkPolyData>::New();
+    m_niftiCenterlineData->SetPoints(points);
+    m_niftiCenterlineData->SetLines(lines);
+    m_niftiCenterlineMapper =
+        vtkSmartPointer<vtkPolyDataMapper>::New();
+    m_niftiCenterlineMapper->SetInputData(m_niftiCenterlineData);
+    m_niftiCenterlineMapper->ScalarVisibilityOff();
+    m_niftiCenterlineActor = vtkSmartPointer<vtkActor>::New();
+    m_niftiCenterlineActor->SetMapper(m_niftiCenterlineMapper);
+    m_niftiCenterlineActor->SetPickable(false);
+    m_niftiCenterlineActor->SetUseBounds(false);
+    m_niftiCenterlineActor->GetProperty()->SetColor(1.0, 0.92, 0.1);
+    m_niftiCenterlineActor->GetProperty()->SetLineWidth(4.0);
+    m_niftiCenterlineActor->GetProperty()->LightingOff();
+    m_renderer->AddActor(m_niftiCenterlineActor);
+
+    for (vtkIdType endpointIndex :
+         {vtkIdType{0},
+          static_cast<vtkIdType>(pointsLpsMm.size() - 1)}) {
+        double endpoint[3] = {};
+        points->GetPoint(endpointIndex, endpoint);
+        vtkNew<vtkSphereSource> sphere;
+        sphere->SetCenter(endpoint);
+        sphere->SetRadius(1.25);
+        sphere->SetThetaResolution(20);
+        sphere->SetPhiResolution(20);
+        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputConnection(sphere->GetOutputPort());
+        auto actor = vtkSmartPointer<vtkActor>::New();
+        actor->SetMapper(mapper);
+        actor->SetPickable(false);
+        actor->SetUseBounds(false);
+        actor->GetProperty()->SetColor(1.0, 0.35, 0.05);
+        actor->GetProperty()->SetAmbient(0.35);
+        m_renderer->AddActor(actor);
+        m_niftiCenterlineEndpointActors.push_back(actor);
+    }
+    m_renderer->ResetCameraClippingRange();
+    m_renderWindow->Render();
+}
+
+void Mask3DViewerWidget::setNiftiCenterlineVisible(bool visible)
+{
+    if (m_niftiCenterlineActor) {
+        m_niftiCenterlineActor->SetVisibility(visible);
+    }
+    for (vtkActor *actor : m_niftiCenterlineEndpointActors) {
+        if (actor) {
+            actor->SetVisibility(visible);
+        }
+    }
+    m_renderWindow->Render();
+}
+
+void Mask3DViewerWidget::clearNiftiCenterline()
+{
+    if (m_niftiCenterlineActor) {
+        m_renderer->RemoveActor(m_niftiCenterlineActor);
+    }
+    for (vtkActor *actor : m_niftiCenterlineEndpointActors) {
+        if (actor) {
+            m_renderer->RemoveActor(actor);
+        }
+    }
+    m_niftiCenterlineEndpointActors.clear();
+    m_niftiCenterlineActor = nullptr;
+    m_niftiCenterlineMapper = nullptr;
+    m_niftiCenterlineData = nullptr;
+    if (m_renderWindow) {
+        m_renderWindow->Render();
+    }
+}
+
 void Mask3DViewerWidget::removeMultiStructurePreview(bool restoreNormalMask)
 {
     const bool wasActive = m_multiStructurePreviewActive;
+    clearNiftiCenterline();
     for (const MultiStructureSurface &surface : m_multiStructureSurfaces) {
         if (surface.actor) {
             m_renderer->RemoveActor(surface.actor);

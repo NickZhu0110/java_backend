@@ -78,6 +78,10 @@ public:
     std::vector<MultiStructureSurfaceInfo> multiStructureSurfaces() const;
     void setMultiStructureVisible(int labelValue, bool visible);
     void setMultiStructureOpacity(int labelValue, double opacity);
+    void setNiftiCenterline(
+        const std::vector<std::array<double, 3>> &pointsLpsMm);
+    void setNiftiCenterlineVisible(bool visible);
+    void clearNiftiCenterline();
     const vtkImageData *activeNiftiCtImage() const;
     const NiftiVolumeGeometry *activeNiftiCtGeometry() const;
     const vtkImageData *activeNiftiSegmentationImage() const;
@@ -160,6 +164,10 @@ private:
     vtkSmartPointer<vtkOrientationMarkerWidget> m_orientationMarker;
     vtkSmartPointer<vtkActor> m_boundsActor;
     vtkSmartPointer<vtkActor> m_multiStructureBoundsActor;
+    vtkSmartPointer<vtkPolyData> m_niftiCenterlineData;
+    vtkSmartPointer<vtkPolyDataMapper> m_niftiCenterlineMapper;
+    vtkSmartPointer<vtkActor> m_niftiCenterlineActor;
+    std::vector<vtkSmartPointer<vtkActor>> m_niftiCenterlineEndpointActors;
     MultiStructureVolume m_multiStructureVolume;
     std::vector<MultiStructureSurface> m_multiStructureSurfaces;
     std::array<vtkSmartPointer<vtkPlaneSource>, 3> m_positionPlaneSources;

@@ -3,6 +3,9 @@
 #include "viewer/CaseVolumeLoader.h"
 #include "viewer/Mask3DViewerWidget.h"
 #include "viewer/MultiStructureNiftiLoader.h"
+#include "vessel/StraightenedVesselWindow.h"
+#include "vessel/VesselPathSelectionDialog.h"
+#include "vessel/VesselStraighteningController.h"
 
 #include <QButtonGroup>
 #include <QBrush>
@@ -30,6 +33,7 @@
 #include <QPen>
 #include <QPushButton>
 #include <QProgressDialog>
+#include <QProgressBar>
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QSignalBlocker>
@@ -83,6 +87,7 @@ CTViewerWidget::CTViewerWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();
+    initializeVesselStraightening();
     if (qEnvironmentVariableIntValue("CAC_ENABLE_SYNTHETIC_DEMO") == 1) {
         createSyntheticStudy();
         updateSliceImages();
@@ -157,6 +162,7 @@ bool CTViewerWidget::activateNiftiReview(
     const QString &segmentationPath,
     QString *errorMessage)
 {
+    invalidateVesselStraightening();
     if (!m_mask3DViewer->setMultiStructurePreview(loadedVolume, errorMessage)) {
         return false;
     }
@@ -197,9 +203,294 @@ int CTViewerWidget::selectedVesselLabel() const
     return m_niftiVesselSelectionState.selectedVesselLabel();
 }
 
+bool CTViewerWidget::hasSelectedVesselComponent() const
+{
+    return m_niftiVesselSelectionState.hasSelectedComponent();
+}
+
+int CTViewerWidget::selectedVesselComponent() const
+{
+    return m_niftiVesselSelectionState.selectedComponent();
+}
+
 const NiftiVesselSelectionState &CTViewerWidget::niftiVesselSelectionState() const
 {
     return m_niftiVesselSelectionState;
+}
+
+void CTViewerWidget::initializeVesselStraightening()
+{
+    m_vesselStraighteningController =
+        new VesselStraighteningController(this);
+    m_straightenedVesselWindow =
+        new StraightenedVesselWindow(this);
+    connect(this, &CTViewerWidget::straightenSelectedVesselRequested,
+            this, &CTViewerWidget::startVesselAnalysis);
+    connect(m_cancelVesselProcessingButton, &QPushButton::clicked,
+            m_vesselStraighteningController,
+            &VesselStraighteningController::cancel);
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::progressChanged,
+            this, [this](int percent, const QString &message) {
+        if (m_vesselProgressBar) {
+            m_vesselProgressBar->setValue(percent);
+            m_vesselProgressBar->setFormat(
+                QStringLiteral("%1% \u2014 %2").arg(percent).arg(message));
+        }
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                message.toHtmlEscaped());
+        }
+    });
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::runningChanged,
+            this, [this](bool running) {
+        if (m_vesselProgressBar) {
+            m_vesselProgressBar->setVisible(running);
+            if (!running) {
+                m_vesselProgressBar->setValue(0);
+            }
+        }
+        if (m_cancelVesselProcessingButton) {
+            m_cancelVesselProcessingButton->setVisible(running);
+            m_cancelVesselProcessingButton->setEnabled(running);
+        }
+        if (m_vesselLabelComboBox) {
+            m_vesselLabelComboBox->setEnabled(!running);
+        }
+        if (m_vesselComponentComboBox) {
+            m_vesselComponentComboBox->setEnabled(
+                !running
+                && !m_niftiVesselSelectionState.components().empty());
+        }
+        updateVesselSelectionUi();
+    });
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::candidatesReady,
+            this, &CTViewerWidget::handleVesselCandidates);
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::completed,
+            this, &CTViewerWidget::showStraightenedVesselResult);
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::failed,
+            this, [this](const QString &message) {
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral("VMTK processing failed."));
+        }
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Vessel Straightening"),
+            message);
+    });
+    connect(m_vesselStraighteningController,
+            &VesselStraighteningController::cancelled,
+            this, [this]() {
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral("Vessel processing cancelled."));
+        }
+    });
+    connect(m_straightenedVesselWindow,
+            &StraightenedVesselWindow::anotherPathRequested,
+            this, [this]() {
+        if (!m_vesselStraighteningController) {
+            return;
+        }
+        const QJsonArray candidates =
+            m_vesselStraighteningController->candidatePaths();
+        if (candidates.isEmpty()) {
+            return;
+        }
+        VesselPathSelectionDialog dialog(candidates, this);
+        if (dialog.exec() == QDialog::Accepted) {
+            startVesselPath(dialog.selectedPathId());
+        }
+    });
+    connect(m_straightenedVesselWindow,
+            &StraightenedVesselWindow::centerlineVisibilityRequested,
+            this, [this](bool visible) {
+        if (m_mask3DViewer) {
+            m_mask3DViewer->setNiftiCenterlineVisible(visible);
+        }
+    });
+    connect(m_vesselSelectionStatusLabel, &QLabel::linkActivated,
+            this, [this](const QString &link) {
+        if (link == QStringLiteral("reopen")
+            && m_straightenedVesselWindow) {
+            m_straightenedVesselWindow->show();
+            m_straightenedVesselWindow->raise();
+            m_straightenedVesselWindow->activateWindow();
+        }
+    });
+}
+
+void CTViewerWidget::startVesselAnalysis()
+{
+    if (!m_vesselStraighteningController) {
+        return;
+    }
+    QString error;
+    if (!m_vesselStraighteningController->startAnalysis(
+            m_niftiVesselSelectionState, &error)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Vessel Straightening"),
+            error);
+    }
+}
+
+void CTViewerWidget::handleVesselCandidates(
+    const QJsonArray &candidates)
+{
+    if (candidates.isEmpty()) {
+        return;
+    }
+    if (candidates.size() == 1) {
+        const QString pathId =
+            candidates.first().toObject()
+                .value(QStringLiteral("path_id")).toString();
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral(
+                    "One valid centerline path was found and automatically selected."));
+        }
+        startVesselPath(pathId);
+        return;
+    }
+    VesselPathSelectionDialog dialog(candidates, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral(
+                    "%1 centerline paths are available; no path was selected.")
+                    .arg(candidates.size()));
+        }
+        return;
+    }
+    startVesselPath(dialog.selectedPathId());
+}
+
+void CTViewerWidget::startVesselPath(const QString &pathId)
+{
+    if (pathId.isEmpty() || !m_vesselStraighteningController) {
+        return;
+    }
+    QString error;
+    if (!m_vesselStraighteningController->startStraightening(
+            pathId, &error)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Vessel Straightening"),
+            error);
+    }
+}
+
+void CTViewerWidget::showStraightenedVesselResult(
+    const QJsonObject &result)
+{
+    QString error;
+    if (!displayCenterlineJson(
+            result.value(
+                QStringLiteral("selected_centerline_path")).toString(),
+            &error)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Vessel Centerline"),
+            error);
+        return;
+    }
+    if (!m_straightenedVesselWindow->loadResult(
+            result,
+            m_vesselStraighteningController->candidatePaths(),
+            &error)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Straightened Vessel"),
+            error);
+        return;
+    }
+    m_straightenedVesselWindow->show();
+    m_straightenedVesselWindow->raise();
+    m_straightenedVesselWindow->activateWindow();
+    if (m_vesselSelectionStatusLabel) {
+        m_vesselSelectionStatusLabel->setText(
+            QStringLiteral(
+                "Straightened vessel is ready. "
+                "<a href=\"reopen\">Reopen latest result</a>"));
+    }
+}
+
+bool CTViewerWidget::displayCenterlineJson(
+    const QString &path,
+    QString *errorMessage)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Could not read the selected centerline: %1")
+                                .arg(file.errorString());
+        }
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError
+        || !document.isObject()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Selected centerline JSON is invalid: %1")
+                                .arg(parseError.errorString());
+        }
+        return false;
+    }
+    const QJsonArray pointValues =
+        document.object().value(
+            QStringLiteral("points_lps_mm")).toArray();
+    std::vector<std::array<double, 3>> points;
+    points.reserve(static_cast<size_t>(pointValues.size()));
+    for (const QJsonValue &pointValue : pointValues) {
+        const QJsonArray point = pointValue.toArray();
+        if (point.size() != 3
+            || !point.at(0).isDouble()
+            || !point.at(1).isDouble()
+            || !point.at(2).isDouble()) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral(
+                    "Selected centerline contains an invalid point.");
+            }
+            return false;
+        }
+        points.push_back({
+            point.at(0).toDouble(),
+            point.at(1).toDouble(),
+            point.at(2).toDouble()
+        });
+    }
+    if (points.size() < 2 || !m_mask3DViewer) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Selected centerline contains fewer than two points.");
+        }
+        return false;
+    }
+    m_mask3DViewer->setNiftiCenterline(points);
+    return true;
+}
+
+void CTViewerWidget::invalidateVesselStraightening()
+{
+    if (m_vesselStraighteningController) {
+        m_vesselStraighteningController->reset();
+    }
+    if (m_mask3DViewer) {
+        m_mask3DViewer->clearNiftiCenterline();
+    }
+    if (m_straightenedVesselWindow) {
+        m_straightenedVesselWindow->hide();
+    }
 }
 
 bool CTViewerWidget::eventFilter(QObject *watched, QEvent *event)
@@ -675,17 +966,50 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_vesselLabelComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     m_vesselLabelComboBox->addItem(QStringLiteral("Select a label..."));
     vesselSelectorRow->addWidget(m_vesselLabelComboBox, 1);
+    vesselSelectionLayout->addLayout(vesselSelectorRow);
+
+    auto *componentSelectorRow = new QHBoxLayout;
+    componentSelectorRow->setContentsMargins(0, 0, 0, 0);
+    componentSelectorRow->setSpacing(6);
+    componentSelectorRow->addWidget(
+        new QLabel(QStringLiteral("Vessel component:"), m_vesselSelectionWidget));
+    m_vesselComponentComboBox = new QComboBox(m_vesselSelectionWidget);
+    m_vesselComponentComboBox->setEditable(false);
+    m_vesselComponentComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_vesselComponentComboBox->addItem(
+        QStringLiteral("Select a component..."));
+    m_vesselComponentComboBox->setEnabled(false);
+    componentSelectorRow->addWidget(m_vesselComponentComboBox, 1);
     m_straightenSelectedVesselButton = new QPushButton(
         QStringLiteral("Straighten Selected Vessel"), m_vesselSelectionWidget);
     m_straightenSelectedVesselButton->setEnabled(false);
     m_straightenSelectedVesselButton->setToolTip(
-        QStringLiteral("Vessel straightening will be implemented next"));
-    vesselSelectorRow->addWidget(m_straightenSelectedVesselButton);
-    vesselSelectionLayout->addLayout(vesselSelectorRow);
+        QStringLiteral("Analyze the selected component with VMTK"));
+    componentSelectorRow->addWidget(m_straightenSelectedVesselButton);
+    vesselSelectionLayout->addLayout(componentSelectorRow);
     m_vesselSelectionStatusLabel = new QLabel(
         QStringLiteral("No vessel label selected."), m_vesselSelectionWidget);
     m_vesselSelectionStatusLabel->setWordWrap(true);
+    m_vesselSelectionStatusLabel->setTextFormat(Qt::RichText);
+    m_vesselSelectionStatusLabel->setTextInteractionFlags(
+        Qt::TextBrowserInteraction);
+    m_vesselSelectionStatusLabel->setOpenExternalLinks(false);
     vesselSelectionLayout->addWidget(m_vesselSelectionStatusLabel);
+    auto *vesselProgressRow = new QHBoxLayout;
+    vesselProgressRow->setContentsMargins(0, 0, 0, 0);
+    vesselProgressRow->setSpacing(6);
+    m_vesselProgressBar = new QProgressBar(m_vesselSelectionWidget);
+    m_vesselProgressBar->setRange(0, 100);
+    m_vesselProgressBar->setValue(0);
+    m_vesselProgressBar->setTextVisible(true);
+    m_vesselProgressBar->setVisible(false);
+    vesselProgressRow->addWidget(m_vesselProgressBar, 1);
+    m_cancelVesselProcessingButton = new QPushButton(
+        QStringLiteral("Cancel"), m_vesselSelectionWidget);
+    m_cancelVesselProcessingButton->setEnabled(false);
+    m_cancelVesselProcessingButton->setVisible(false);
+    vesselProgressRow->addWidget(m_cancelVesselProcessingButton);
+    vesselSelectionLayout->addLayout(vesselProgressRow);
     m_vesselSelectionWidget->setVisible(false);
 
     m_multiStructureControlsWidget = new QWidget(container);
@@ -741,14 +1065,12 @@ QWidget *CTViewerWidget::create3DPanelWidget()
             qOverload<int>(&QComboBox::currentIndexChanged),
             this,
             &CTViewerWidget::handleVesselLabelSelection);
-    connect(m_straightenSelectedVesselButton, &QPushButton::clicked,
-            this, [this]() {
-        QMessageBox::information(
+    connect(m_vesselComponentComboBox,
+            qOverload<int>(&QComboBox::currentIndexChanged),
             this,
-            QStringLiteral("Straighten Selected Vessel"),
-            QStringLiteral("Vessel straightening will be implemented next. "
-                           "No centerline or output has been created."));
-    });
+            &CTViewerWidget::handleVesselComponentSelection);
+    connect(m_straightenSelectedVesselButton, &QPushButton::clicked,
+            this, &CTViewerWidget::straightenSelectedVesselRequested);
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(4, 4, 4, 4);
@@ -1391,6 +1713,7 @@ void CTViewerWidget::rebuildMultiStructureControls()
         }
         m_vesselLabelComboBox->setCurrentIndex(0);
     }
+    rebuildVesselComponentSelector();
     updateVesselSelectionUi();
     if (!m_mask3DViewer || !m_multiStructureControlsLayout) {
         return;
@@ -1483,9 +1806,11 @@ void CTViewerWidget::clearMultiStructureControls()
 
 void CTViewerWidget::handleVesselLabelSelection(int comboBoxIndex)
 {
+    invalidateVesselStraightening();
     if (!m_multiStructurePreviewUiActive || !m_vesselLabelComboBox
         || comboBoxIndex <= 0) {
         m_niftiVesselSelectionState.clearSelection();
+        rebuildVesselComponentSelector();
         updateVesselSelectionUi();
         return;
     }
@@ -1495,6 +1820,7 @@ void CTViewerWidget::handleVesselLabelSelection(int comboBoxIndex)
         m_vesselLabelComboBox->itemData(comboBoxIndex).toInt(&labelValueValid);
     if (!labelValueValid || !m_mask3DViewer) {
         m_niftiVesselSelectionState.clearSelection();
+        rebuildVesselComponentSelector();
         updateVesselSelectionUi(QStringLiteral(
             "The selected entry is not a detected label in the current dataset."));
         return;
@@ -1507,19 +1833,88 @@ void CTViewerWidget::handleVesselLabelSelection(int comboBoxIndex)
             labelValue, surface, &selectionError)) {
         QSignalBlocker blocker(m_vesselLabelComboBox);
         m_vesselLabelComboBox->setCurrentIndex(0);
+        rebuildVesselComponentSelector();
         updateVesselSelectionUi(selectionError);
         return;
     }
 
+    rebuildVesselComponentSelector();
+    updateVesselSelectionUi();
+}
+
+void CTViewerWidget::rebuildVesselComponentSelector()
+{
+    if (!m_vesselComponentComboBox) {
+        return;
+    }
+    QSignalBlocker blocker(m_vesselComponentComboBox);
+    m_vesselComponentComboBox->clear();
+    m_vesselComponentComboBox->addItem(
+        QStringLiteral("Select a component..."));
+    const auto &components = m_niftiVesselSelectionState.components();
+    for (const NiftiVesselComponentInfo &component : components) {
+        QString text = QStringLiteral(
+            "Component %1 \u2014 %2 voxels | %3 mm\u00b3 | %4%")
+                           .arg(component.component)
+                           .arg(component.voxelCount)
+                           .arg(component.physicalVolumeMm3, 0, 'f', 1)
+                           .arg(component.percentageOfSelectedLabel, 0, 'f', 1);
+        if (component.likelyNoise) {
+            text += QStringLiteral(" | likely noise");
+        }
+        m_vesselComponentComboBox->addItem(text, component.component);
+    }
+    m_vesselComponentComboBox->setEnabled(!components.empty());
+    const int selected = m_niftiVesselSelectionState.selectedComponent();
+    if (selected > 0) {
+        for (int index = 1; index < m_vesselComponentComboBox->count(); ++index) {
+            if (m_vesselComponentComboBox->itemData(index).toInt() == selected) {
+                m_vesselComponentComboBox->setCurrentIndex(index);
+                break;
+            }
+        }
+    }
+}
+
+void CTViewerWidget::handleVesselComponentSelection(int comboBoxIndex)
+{
+    invalidateVesselStraightening();
+    if (!m_multiStructurePreviewUiActive || !m_vesselComponentComboBox
+        || comboBoxIndex <= 0) {
+        m_niftiVesselSelectionState.clearComponentSelection();
+        updateVesselSelectionUi();
+        return;
+    }
+    bool validValue = false;
+    const int component =
+        m_vesselComponentComboBox->itemData(comboBoxIndex).toInt(&validValue);
+    QString error;
+    if (!validValue
+        || !m_niftiVesselSelectionState.selectComponent(component, &error)) {
+        QSignalBlocker blocker(m_vesselComponentComboBox);
+        m_vesselComponentComboBox->setCurrentIndex(0);
+        updateVesselSelectionUi(
+            error.isEmpty()
+                ? QStringLiteral("The selected component is invalid.")
+                : error);
+        return;
+    }
     updateVesselSelectionUi();
 }
 
 void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
 {
+    const bool labelValid =
+        m_niftiVesselSelectionState.hasSelectedVesselLabel();
+    const bool componentValid =
+        m_niftiVesselSelectionState.hasSelectedComponent();
     const bool valid =
         m_niftiVesselSelectionState.selectionUsableForProcessing();
     if (m_straightenSelectedVesselButton) {
-        m_straightenSelectedVesselButton->setEnabled(valid);
+        m_straightenSelectedVesselButton->setEnabled(
+            valid
+            && (!m_vesselStraighteningController
+                || !m_vesselStraighteningController->isRunning()));
     }
 
     if (m_vesselSelectionStatusLabel) {
@@ -1527,7 +1922,7 @@ void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
             m_vesselSelectionStatusLabel->setText(
                 QStringLiteral("Vessel label selection is invalid: %1")
                     .arg(selectionError));
-        } else if (!valid) {
+        } else if (!labelValid) {
             m_vesselSelectionStatusLabel->setText(
                 QStringLiteral("No vessel label selected."));
         } else {
@@ -1546,6 +1941,31 @@ void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
                                  .arg(validation->connectedComponentCount)
                                  .arg(validation->largestConnectedComponentVoxelCount)
                                  .arg(bounds.join(QStringLiteral(", ")));
+            if (!componentValid) {
+                status += QStringLiteral(
+                    "\nSelect one connected component before straightening.");
+            } else if (const NiftiVesselComponentInfo *component =
+                           m_niftiVesselSelectionState.selectedComponentInfo()) {
+                status += QStringLiteral(
+                    "\nComponent %1: %2 voxels | %3 mm\u00b3 | %4% | "
+                    "bounding dimensions: %5 \u00d7 %6 \u00d7 %7 mm")
+                              .arg(component->component)
+                              .arg(component->voxelCount)
+                              .arg(component->physicalVolumeMm3, 0, 'f', 1)
+                              .arg(component->percentageOfSelectedLabel, 0, 'f', 1)
+                              .arg(component->physicalBoundingBoxDimensionsMm[0],
+                                   0, 'f', 1)
+                              .arg(component->physicalBoundingBoxDimensionsMm[1],
+                                   0, 'f', 1)
+                              .arg(component->physicalBoundingBoxDimensionsMm[2],
+                                   0, 'f', 1);
+                if (m_niftiVesselSelectionState.components().size() == 1) {
+                    status += QStringLiteral(" | automatically selected");
+                }
+                if (component->likelyNoise) {
+                    status += QStringLiteral(" | likely noise");
+                }
+            }
             if (!validation->warning.isEmpty()) {
                 status += QStringLiteral("\nWarning: %1").arg(validation->warning);
             }
@@ -1565,8 +1985,11 @@ void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
     }
 
     emit vesselLabelSelectionChanged(
-        valid,
-        valid ? m_niftiVesselSelectionState.selectedVesselLabel() : 0);
+        labelValid,
+        labelValid ? m_niftiVesselSelectionState.selectedVesselLabel() : 0);
+    emit vesselComponentSelectionChanged(
+        componentValid,
+        componentValid ? m_niftiVesselSelectionState.selectedComponent() : 0);
 }
 
 void CTViewerWidget::setMultiStructurePreviewUiActive(bool active)
@@ -1730,6 +2153,7 @@ void CTViewerWidget::leaveNiftiReviewMode()
 
     finishBrushStroke();
     hideBrushCursor();
+    invalidateVesselStraightening();
     m_niftiVesselSelectionState.clear();
     if (m_mask3DViewer) {
         m_mask3DViewer->clearMultiStructurePreview();

@@ -63,6 +63,12 @@ qt_add_executable(qt-cac-app
     src/viewer/PythonSimpleItkPreprocessor.h
     src/viewer/RawVolumeLoader.cpp
     src/viewer/RawVolumeLoader.h
+    src/vessel/StraightenedVesselWindow.cpp
+    src/vessel/StraightenedVesselWindow.h
+    src/vessel/VesselPathSelectionDialog.cpp
+    src/vessel/VesselPathSelectionDialog.h
+    src/vessel/VesselStraighteningController.cpp
+    src/vessel/VesselStraighteningController.h
 )
 
 target_include_directories(qt-cac-app

@@ -10,6 +10,17 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
+
+struct NiftiVesselComponentInfo
+{
+    int component = 0;
+    std::uint64_t voxelCount = 0;
+    double physicalVolumeMm3 = 0.0;
+    double percentageOfSelectedLabel = 0.0;
+    std::array<double, 3> physicalBoundingBoxDimensionsMm = {0.0, 0.0, 0.0};
+    bool likelyNoise = false;
+};
 
 struct NiftiVesselLabelValidation
 {
@@ -35,14 +46,20 @@ public:
     bool selectLabel(int labelValue,
                      const vtkPolyData *surface,
                      QString *errorMessage = nullptr);
+    bool selectComponent(int component, QString *errorMessage = nullptr);
+    void clearComponentSelection();
 
     bool hasSelectedVesselLabel() const;
+    bool hasSelectedComponent() const;
     bool selectionUsableForProcessing() const;
     int selectedVesselLabel() const;
+    int selectedComponent() const;
     const MultiStructureVolume *currentMultiStructureVolume() const;
     const vtkImageData *selectedLabelBinaryMask() const;
     const vtkPolyData *selectedLabelSurface() const;
     const NiftiVesselLabelValidation *validation() const;
+    const std::vector<NiftiVesselComponentInfo> &components() const;
+    const NiftiVesselComponentInfo *selectedComponentInfo() const;
 
 private:
     const MultiStructureVolume *m_volume = nullptr;
@@ -51,4 +68,6 @@ private:
     vtkSmartPointer<vtkImageData> m_selectedBinaryMask;
     const vtkPolyData *m_selectedSurface = nullptr;
     NiftiVesselLabelValidation m_validation;
+    std::vector<NiftiVesselComponentInfo> m_components;
+    int m_selectedComponent = 0;
 };

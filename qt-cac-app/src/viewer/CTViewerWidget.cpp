@@ -4,7 +4,6 @@
 #include "viewer/Mask3DViewerWidget.h"
 #include "viewer/MultiStructureNiftiLoader.h"
 #include "vessel/StraightenedVesselWindow.h"
-#include "vessel/VesselPathSelectionDialog.h"
 #include "vessel/VesselStraighteningController.h"
 
 #include <QButtonGroup>
@@ -263,6 +262,18 @@ void CTViewerWidget::initializeVesselStraightening()
                 !running
                 && !m_niftiVesselSelectionState.components().empty());
         }
+        if (m_vesselPathComboBox) {
+            m_vesselPathComboBox->setEnabled(
+                !running && !m_selectableVesselPaths.isEmpty());
+        }
+        if (m_showAllVesselPathsCheckBox) {
+            m_showAllVesselPathsCheckBox->setEnabled(
+                !running && !m_selectableVesselPaths.isEmpty());
+        }
+        if (m_showMinorVesselPathsCheckBox) {
+            m_showMinorVesselPathsCheckBox->setEnabled(
+                !running && !m_minorVesselPaths.isEmpty());
+        }
         updateVesselSelectionUi();
     });
     connect(m_vesselStraighteningController,
@@ -294,17 +305,16 @@ void CTViewerWidget::initializeVesselStraightening()
     connect(m_straightenedVesselWindow,
             &StraightenedVesselWindow::anotherPathRequested,
             this, [this]() {
-        if (!m_vesselStraighteningController) {
-            return;
+        m_straightenedVesselWindow->hide();
+        if (m_vesselPathComboBox) {
+            m_vesselPathComboBox->setFocus();
+            m_vesselPathComboBox->showPopup();
         }
-        const QJsonArray candidates =
-            m_vesselStraighteningController->candidatePaths();
-        if (candidates.isEmpty()) {
-            return;
-        }
-        VesselPathSelectionDialog dialog(candidates, this);
-        if (dialog.exec() == QDialog::Accepted) {
-            startVesselPath(dialog.selectedPathId());
+        if (m_vesselSelectionStatusLabel) {
+            m_vesselSelectionStatusLabel->setText(
+                QStringLiteral(
+                    "Choose another path in the selector, inspect it in 3D, "
+                    "then click Generate CPR for Selected Path."));
         }
     });
     connect(m_straightenedVesselWindow,
@@ -313,6 +323,7 @@ void CTViewerWidget::initializeVesselStraightening()
         if (m_mask3DViewer) {
             m_mask3DViewer->setNiftiCenterlineVisible(visible);
         }
+        updateVesselSelectionUi();
     });
     connect(m_vesselSelectionStatusLabel, &QLabel::linkActivated,
             this, [this](const QString &link) {
@@ -330,6 +341,7 @@ void CTViewerWidget::startVesselAnalysis()
     if (!m_vesselStraighteningController) {
         return;
     }
+    invalidateVesselStraightening();
     QString error;
     if (!m_vesselStraighteningController->startAnalysis(
             m_niftiVesselSelectionState, &error)) {
@@ -346,29 +358,286 @@ void CTViewerWidget::handleVesselCandidates(
     if (candidates.isEmpty()) {
         return;
     }
-    if (candidates.size() == 1) {
-        const QString pathId =
-            candidates.first().toObject()
-                .value(QStringLiteral("path_id")).toString();
-        if (m_vesselSelectionStatusLabel) {
-            m_vesselSelectionStatusLabel->setText(
-                QStringLiteral(
-                    "One valid centerline path was found and automatically selected."));
-        }
-        startVesselPath(pathId);
+    const QJsonObject analysis =
+        m_vesselStraighteningController->candidateAnalysis();
+    m_primaryVesselPaths =
+        analysis.value(QStringLiteral("primary_paths")).toArray();
+    m_minorVesselPaths =
+        analysis.value(QStringLiteral("minor_paths")).toArray();
+    m_selectableVesselPaths = candidates;
+    m_vesselPathFilteringSummary =
+        analysis.value(QStringLiteral("filtering_summary")).toObject();
+    if (m_primaryVesselPaths.isEmpty()) {
+        m_primaryVesselPaths = candidates;
+    }
+    if (m_showAllVesselPathsCheckBox) {
+        m_showAllVesselPathsCheckBox->setEnabled(true);
+    }
+    if (m_showMinorVesselPathsCheckBox) {
+        m_showMinorVesselPathsCheckBox->setEnabled(
+            !m_minorVesselPaths.isEmpty());
+        m_showMinorVesselPathsCheckBox->setChecked(false);
+    }
+    rebuildVesselPathSelector();
+}
+
+void CTViewerWidget::rebuildVesselPathSelector()
+{
+    if (!m_vesselPathComboBox) {
         return;
     }
-    VesselPathSelectionDialog dialog(candidates, this);
-    if (dialog.exec() != QDialog::Accepted) {
-        if (m_vesselSelectionStatusLabel) {
-            m_vesselSelectionStatusLabel->setText(
-                QStringLiteral(
-                    "%1 centerline paths are available; no path was selected.")
-                    .arg(candidates.size()));
+    const QString previousPathId =
+        m_vesselPathComboBox->currentData().toString();
+    QSignalBlocker blocker(m_vesselPathComboBox);
+    m_vesselPathComboBox->clear();
+    const bool showMinor =
+        m_showMinorVesselPathsCheckBox
+        && m_showMinorVesselPathsCheckBox->isChecked();
+    QJsonArray visiblePaths = m_primaryVesselPaths;
+    if (showMinor) {
+        for (const QJsonValue &value : m_minorVesselPaths) {
+            visiblePaths.append(value);
         }
+    }
+    for (const QJsonValue &value : visiblePaths) {
+        const QJsonObject candidate = value.toObject();
+        QString label =
+            candidate.value(QStringLiteral("display_label")).toString();
+        if (label.isEmpty()) {
+            label = QStringLiteral("Path %1 \u2014 %2 mm")
+                        .arg(candidate.value(
+                            QStringLiteral("display_index")).toInt())
+                        .arg(candidate.value(
+                            QStringLiteral("physical_length_mm")).toDouble(),
+                             0, 'f', 1);
+        }
+        const QString status = candidate.value(
+            QStringLiteral("selection_status")).toString();
+        if (status == QStringLiteral("minor")) {
+            label.prepend(QStringLiteral("[Minor] "));
+        } else {
+            label.prepend(QStringLiteral("[Primary] "));
+        }
+        m_vesselPathComboBox->addItem(
+            label,
+            candidate.value(QStringLiteral("path_id")).toString());
+    }
+    m_vesselPathComboBox->setEnabled(
+        m_vesselPathComboBox->count() > 0);
+    int selectedIndex = -1;
+    for (int index = 0;
+         index < m_vesselPathComboBox->count();
+         ++index) {
+        if (m_vesselPathComboBox->itemData(index).toString()
+            == previousPathId) {
+            selectedIndex = index;
+            break;
+        }
+    }
+    if (selectedIndex < 0 && m_vesselPathComboBox->count() > 0) {
+        selectedIndex = 0;
+    }
+    m_vesselPathComboBox->setCurrentIndex(selectedIndex);
+    blocker.unblock();
+    handleVesselPathSelection(selectedIndex);
+}
+
+QJsonObject CTViewerWidget::selectedVesselPathCandidate() const
+{
+    if (!m_vesselPathComboBox
+        || m_vesselPathComboBox->currentIndex() < 0) {
+        return {};
+    }
+    const QString pathId =
+        m_vesselPathComboBox->currentData().toString();
+    for (const QJsonValue &value : m_selectableVesselPaths) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("path_id")).toString()
+            == pathId) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+bool CTViewerWidget::candidatePoints(
+    const QJsonObject &candidate,
+    std::vector<std::array<double, 3>> *points) const
+{
+    points->clear();
+    const QJsonArray values =
+        candidate.value(QStringLiteral("points_lps_mm")).toArray();
+    points->reserve(static_cast<size_t>(values.size()));
+    for (const QJsonValue &value : values) {
+        const QJsonArray point = value.toArray();
+        if (point.size() != 3
+            || !point.at(0).isDouble()
+            || !point.at(1).isDouble()
+            || !point.at(2).isDouble()) {
+            points->clear();
+            return false;
+        }
+        points->push_back({
+            point.at(0).toDouble(),
+            point.at(1).toDouble(),
+            point.at(2).toDouble()
+        });
+    }
+    return points->size() >= 2;
+}
+
+void CTViewerWidget::handleVesselPathSelection(int comboBoxIndex)
+{
+    Q_UNUSED(comboBoxIndex)
+    previewSelectedVesselPath();
+}
+
+void CTViewerWidget::previewSelectedVesselPath()
+{
+    if (!m_mask3DViewer) {
         return;
     }
-    startVesselPath(dialog.selectedPathId());
+    const QJsonObject selected = selectedVesselPathCandidate();
+    const QString selectedPathId =
+        selected.value(QStringLiteral("path_id")).toString();
+    QJsonArray previewCandidates = m_primaryVesselPaths;
+    if (m_showMinorVesselPathsCheckBox
+        && m_showMinorVesselPathsCheckBox->isChecked()) {
+        for (const QJsonValue &value : m_minorVesselPaths) {
+            previewCandidates.append(value);
+        }
+    }
+    std::vector<std::vector<std::array<double, 3>>> paths;
+    int selectedIndex = -1;
+    for (const QJsonValue &value : previewCandidates) {
+        const QJsonObject candidate = value.toObject();
+        std::vector<std::array<double, 3>> points;
+        if (!candidatePoints(candidate, &points)) {
+            continue;
+        }
+        if (candidate.value(QStringLiteral("path_id")).toString()
+            == selectedPathId) {
+            selectedIndex = static_cast<int>(paths.size());
+        }
+        paths.push_back(std::move(points));
+    }
+    const bool loaded =
+        selectedIndex >= 0
+        && m_mask3DViewer->setNiftiCenterlineCandidates(
+            paths,
+            selectedIndex,
+            m_showAllVesselPathsCheckBox
+                && m_showAllVesselPathsCheckBox->isChecked());
+    if (m_generateVesselCprButton) {
+        m_generateVesselCprButton->setEnabled(
+            loaded
+            && (!m_vesselStraighteningController
+                || !m_vesselStraighteningController->isRunning()));
+    }
+    updateVesselPathDetails();
+}
+
+void CTViewerWidget::updateVesselPathDetails()
+{
+    if (!m_vesselPathDetailsLabel) {
+        return;
+    }
+    const QJsonObject candidate = selectedVesselPathCandidate();
+    if (candidate.isEmpty()) {
+        m_vesselPathDetailsLabel->clear();
+        m_vesselPathDetailsLabel->setVisible(false);
+        return;
+    }
+    const auto pointText = [&candidate](const QString &key) {
+        const QJsonArray point = candidate.value(key).toArray();
+        if (point.size() != 3) {
+            return QStringLiteral("\u2014");
+        }
+        return QStringLiteral("(%1, %2, %3) mm LPS")
+            .arg(point.at(0).toDouble(), 0, 'f', 1)
+            .arg(point.at(1).toDouble(), 0, 'f', 1)
+            .arg(point.at(2).toDouble(), 0, 'f', 1);
+    };
+    const auto radiusText = [&candidate](const QString &key) {
+        const QJsonValue value = candidate.value(key);
+        return value.isDouble()
+            ? QString::number(value.toDouble(), 'f', 2)
+            : QStringLiteral("\u2014");
+    };
+    m_vesselPathDetailsLabel->setText(
+        QStringLiteral(
+            "<b>%1</b><br>"
+            "Technical details: ID %2 | start %3 | end %4 | "
+            "radius mean/min/max %5 / %6 / %7 mm | "
+            "branch points %8 | shared with longest path %9%")
+            .arg(candidate.value(
+                     QStringLiteral("display_label")).toString().toHtmlEscaped())
+            .arg(candidate.value(
+                     QStringLiteral("path_id")).toString().toHtmlEscaped())
+            .arg(pointText(
+                QStringLiteral("start_point_lps_mm")).toHtmlEscaped())
+            .arg(pointText(
+                QStringLiteral("end_point_lps_mm")).toHtmlEscaped())
+            .arg(radiusText(QStringLiteral("mean_radius_mm")))
+            .arg(radiusText(QStringLiteral("minimum_radius_mm")))
+            .arg(radiusText(QStringLiteral("maximum_radius_mm")))
+            .arg(candidate.value(
+                QStringLiteral("branch_point_count")).toInt())
+            .arg(candidate.value(
+                QStringLiteral(
+                    "shared_with_longest_path_percentage")).toDouble(),
+                 0, 'f', 1));
+    m_vesselPathDetailsLabel->setVisible(true);
+    const QJsonObject summary = m_vesselPathFilteringSummary;
+    if (m_vesselSelectionStatusLabel) {
+        m_vesselSelectionStatusLabel->setText(
+            QStringLiteral(
+                "Centerline analysis complete: %1 raw paths; "
+                "%2 primary and %3 minor. Excluded duplicates: "
+                "%4 exact, %5 reverse, %6 endpoint-pair, %7 near. "
+                "Select and inspect a path in 3D before generating CPR.")
+                .arg(summary.value(
+                    QStringLiteral("raw_candidate_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral("primary_path_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral("minor_path_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral("exact_duplicate_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral("reverse_duplicate_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral(
+                        "duplicate_endpoint_pair_count")).toInt())
+                .arg(summary.value(
+                    QStringLiteral("near_duplicate_count")).toInt()));
+    }
+}
+
+void CTViewerWidget::generateSelectedVesselPath()
+{
+    const QJsonObject candidate = selectedVesselPathCandidate();
+    if (candidate.isEmpty()
+        || !m_mask3DViewer
+        || !m_mask3DViewer->hasSelectedNiftiCenterlineCandidate()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Generate CPR"),
+            QStringLiteral(
+                "Select a valid path and load its 3D preview first."));
+        return;
+    }
+    if (m_vesselSelectionStatusLabel) {
+        m_vesselSelectionStatusLabel->setText(
+            QStringLiteral("Generating CPR for %1<br>Length: %2 mm")
+                .arg(candidate.value(
+                    QStringLiteral("display_label")).toString().toHtmlEscaped())
+                .arg(candidate.value(
+                    QStringLiteral("physical_length_mm")).toDouble(),
+                     0, 'f', 1));
+    }
+    startVesselPath(
+        candidate.value(QStringLiteral("path_id")).toString());
 }
 
 void CTViewerWidget::startVesselPath(const QString &pathId)
@@ -390,16 +659,6 @@ void CTViewerWidget::showStraightenedVesselResult(
     const QJsonObject &result)
 {
     QString error;
-    if (!displayCenterlineJson(
-            result.value(
-                QStringLiteral("selected_centerline_path")).toString(),
-            &error)) {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("Vessel Centerline"),
-            error);
-        return;
-    }
     if (!m_straightenedVesselWindow->loadResult(
             result,
             m_vesselStraighteningController->candidatePaths(),
@@ -421,65 +680,6 @@ void CTViewerWidget::showStraightenedVesselResult(
     }
 }
 
-bool CTViewerWidget::displayCenterlineJson(
-    const QString &path,
-    QString *errorMessage)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral(
-                "Could not read the selected centerline: %1")
-                                .arg(file.errorString());
-        }
-        return false;
-    }
-    QJsonParseError parseError;
-    const QJsonDocument document =
-        QJsonDocument::fromJson(file.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError
-        || !document.isObject()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral(
-                "Selected centerline JSON is invalid: %1")
-                                .arg(parseError.errorString());
-        }
-        return false;
-    }
-    const QJsonArray pointValues =
-        document.object().value(
-            QStringLiteral("points_lps_mm")).toArray();
-    std::vector<std::array<double, 3>> points;
-    points.reserve(static_cast<size_t>(pointValues.size()));
-    for (const QJsonValue &pointValue : pointValues) {
-        const QJsonArray point = pointValue.toArray();
-        if (point.size() != 3
-            || !point.at(0).isDouble()
-            || !point.at(1).isDouble()
-            || !point.at(2).isDouble()) {
-            if (errorMessage) {
-                *errorMessage = QStringLiteral(
-                    "Selected centerline contains an invalid point.");
-            }
-            return false;
-        }
-        points.push_back({
-            point.at(0).toDouble(),
-            point.at(1).toDouble(),
-            point.at(2).toDouble()
-        });
-    }
-    if (points.size() < 2 || !m_mask3DViewer) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral(
-                "Selected centerline contains fewer than two points.");
-        }
-        return false;
-    }
-    m_mask3DViewer->setNiftiCenterline(points);
-    return true;
-}
-
 void CTViewerWidget::invalidateVesselStraightening()
 {
     if (m_vesselStraighteningController) {
@@ -490,6 +690,34 @@ void CTViewerWidget::invalidateVesselStraightening()
     }
     if (m_straightenedVesselWindow) {
         m_straightenedVesselWindow->hide();
+    }
+    m_primaryVesselPaths = {};
+    m_minorVesselPaths = {};
+    m_selectableVesselPaths = {};
+    m_vesselPathFilteringSummary = {};
+    if (m_vesselPathComboBox) {
+        QSignalBlocker blocker(m_vesselPathComboBox);
+        m_vesselPathComboBox->clear();
+        m_vesselPathComboBox->addItem(
+            QStringLiteral("Analyze vessel paths first..."));
+        m_vesselPathComboBox->setEnabled(false);
+    }
+    if (m_showAllVesselPathsCheckBox) {
+        QSignalBlocker blocker(m_showAllVesselPathsCheckBox);
+        m_showAllVesselPathsCheckBox->setEnabled(false);
+        m_showAllVesselPathsCheckBox->setChecked(true);
+    }
+    if (m_showMinorVesselPathsCheckBox) {
+        QSignalBlocker blocker(m_showMinorVesselPathsCheckBox);
+        m_showMinorVesselPathsCheckBox->setEnabled(false);
+        m_showMinorVesselPathsCheckBox->setChecked(false);
+    }
+    if (m_generateVesselCprButton) {
+        m_generateVesselCprButton->setEnabled(false);
+    }
+    if (m_vesselPathDetailsLabel) {
+        m_vesselPathDetailsLabel->clear();
+        m_vesselPathDetailsLabel->setVisible(false);
     }
 }
 
@@ -981,12 +1209,55 @@ QWidget *CTViewerWidget::create3DPanelWidget()
     m_vesselComponentComboBox->setEnabled(false);
     componentSelectorRow->addWidget(m_vesselComponentComboBox, 1);
     m_straightenSelectedVesselButton = new QPushButton(
-        QStringLiteral("Straighten Selected Vessel"), m_vesselSelectionWidget);
+        QStringLiteral("Analyze Vessel Paths"), m_vesselSelectionWidget);
     m_straightenSelectedVesselButton->setEnabled(false);
     m_straightenSelectedVesselButton->setToolTip(
-        QStringLiteral("Analyze the selected component with VMTK"));
+        QStringLiteral(
+            "Extract and preview VMTK paths without generating CPR"));
     componentSelectorRow->addWidget(m_straightenSelectedVesselButton);
     vesselSelectionLayout->addLayout(componentSelectorRow);
+
+    auto *pathSelectorRow = new QHBoxLayout;
+    pathSelectorRow->setContentsMargins(0, 0, 0, 0);
+    pathSelectorRow->setSpacing(6);
+    pathSelectorRow->addWidget(
+        new QLabel(QStringLiteral("Vessel path:"), m_vesselSelectionWidget));
+    m_vesselPathComboBox = new QComboBox(m_vesselSelectionWidget);
+    m_vesselPathComboBox->addItem(
+        QStringLiteral("Analyze vessel paths first..."));
+    m_vesselPathComboBox->setEnabled(false);
+    m_vesselPathComboBox->setSizeAdjustPolicy(
+        QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_vesselPathComboBox->setMinimumContentsLength(34);
+    pathSelectorRow->addWidget(m_vesselPathComboBox, 1);
+    m_generateVesselCprButton = new QPushButton(
+        QStringLiteral("Generate CPR for Selected Path"),
+        m_vesselSelectionWidget);
+    m_generateVesselCprButton->setEnabled(false);
+    pathSelectorRow->addWidget(m_generateVesselCprButton);
+    vesselSelectionLayout->addLayout(pathSelectorRow);
+
+    auto *pathOptionsRow = new QHBoxLayout;
+    pathOptionsRow->setContentsMargins(0, 0, 0, 0);
+    pathOptionsRow->setSpacing(12);
+    m_showAllVesselPathsCheckBox = new QCheckBox(
+        QStringLiteral("Show all candidate paths"),
+        m_vesselSelectionWidget);
+    m_showAllVesselPathsCheckBox->setChecked(true);
+    m_showAllVesselPathsCheckBox->setEnabled(false);
+    m_showMinorVesselPathsCheckBox = new QCheckBox(
+        QStringLiteral("Show minor paths"),
+        m_vesselSelectionWidget);
+    m_showMinorVesselPathsCheckBox->setChecked(false);
+    m_showMinorVesselPathsCheckBox->setEnabled(false);
+    pathOptionsRow->addWidget(m_showAllVesselPathsCheckBox);
+    pathOptionsRow->addWidget(m_showMinorVesselPathsCheckBox);
+    pathOptionsRow->addStretch(1);
+    vesselSelectionLayout->addLayout(pathOptionsRow);
+    m_vesselPathDetailsLabel = new QLabel(m_vesselSelectionWidget);
+    m_vesselPathDetailsLabel->setWordWrap(true);
+    m_vesselPathDetailsLabel->setVisible(false);
+    vesselSelectionLayout->addWidget(m_vesselPathDetailsLabel);
     m_vesselSelectionStatusLabel = new QLabel(
         QStringLiteral("No vessel label selected."), m_vesselSelectionWidget);
     m_vesselSelectionStatusLabel->setWordWrap(true);
@@ -1071,6 +1342,20 @@ QWidget *CTViewerWidget::create3DPanelWidget()
             &CTViewerWidget::handleVesselComponentSelection);
     connect(m_straightenSelectedVesselButton, &QPushButton::clicked,
             this, &CTViewerWidget::straightenSelectedVesselRequested);
+    connect(m_vesselPathComboBox,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &CTViewerWidget::handleVesselPathSelection);
+    connect(m_showAllVesselPathsCheckBox, &QCheckBox::toggled,
+            this, [this](bool visible) {
+        if (m_mask3DViewer) {
+            m_mask3DViewer->setAllNiftiCenterlineCandidatesVisible(
+                visible);
+        }
+    });
+    connect(m_showMinorVesselPathsCheckBox, &QCheckBox::toggled,
+            this, [this]() { rebuildVesselPathSelector(); });
+    connect(m_generateVesselCprButton, &QPushButton::clicked,
+            this, &CTViewerWidget::generateSelectedVesselPath);
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(4, 4, 4, 4);
@@ -1913,6 +2198,14 @@ void CTViewerWidget::updateVesselSelectionUi(const QString &selectionError)
     if (m_straightenSelectedVesselButton) {
         m_straightenSelectedVesselButton->setEnabled(
             valid
+            && (!m_vesselStraighteningController
+                || !m_vesselStraighteningController->isRunning()));
+    }
+    if (m_generateVesselCprButton) {
+        m_generateVesselCprButton->setEnabled(
+            !selectedVesselPathCandidate().isEmpty()
+            && m_mask3DViewer
+            && m_mask3DViewer->hasSelectedNiftiCenterlineCandidate()
             && (!m_vesselStraighteningController
                 || !m_vesselStraighteningController->isRunning()));
     }

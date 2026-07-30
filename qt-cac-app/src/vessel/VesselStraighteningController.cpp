@@ -111,6 +111,7 @@ bool VesselStraighteningController::startAnalysis(
     m_label = selection.selectedVesselLabel();
     m_component = selection.selectedComponent();
     m_candidatePaths = {};
+    m_candidateAnalysis = {};
     m_latestResult = {};
     if (!createRunDirectory(errorMessage)) {
         return false;
@@ -192,6 +193,7 @@ void VesselStraighteningController::reset()
         cancel();
     }
     m_candidatePaths = {};
+    m_candidateAnalysis = {};
     m_latestResult = {};
     m_lastProcessResult = {};
     m_ctPath.clear();
@@ -214,6 +216,11 @@ QString VesselStraighteningController::outputDirectory() const
 QJsonArray VesselStraighteningController::candidatePaths() const
 {
     return m_candidatePaths;
+}
+
+QJsonObject VesselStraighteningController::candidateAnalysis() const
+{
+    return m_candidateAnalysis;
 }
 
 QJsonObject VesselStraighteningController::latestResult() const
@@ -469,8 +476,9 @@ bool VesselStraighteningController::loadCandidates(
         }
         return false;
     }
+    m_candidateAnalysis = document.object();
     m_candidatePaths =
-        document.object()
+        m_candidateAnalysis
             .value(QStringLiteral("candidate_paths"))
             .toArray();
     if (m_candidatePaths.isEmpty()) {

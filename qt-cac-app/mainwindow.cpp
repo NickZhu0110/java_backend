@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -445,10 +446,34 @@ bool MainWindow::validateInputs() const
     if (ui->outputPathLineEdit->text().trimmed().isEmpty()) {
         missingFields << QStringLiteral("output path");
     }
+    if (ui->outputNameLineEdit->text().trimmed().isEmpty()) {
+        missingFields << QStringLiteral("output name");
+    }
     if (!missingFields.isEmpty()) {
         QMessageBox::warning(const_cast<MainWindow *>(this),
                              QStringLiteral("Missing Required Fields"),
                              QStringLiteral("Please fill: %1").arg(missingFields.join(QStringLiteral(", "))));
+        return false;
+    }
+
+    const QString outputName = ui->outputNameLineEdit->text().trimmed();
+    static const QRegularExpression invalidCharacters(
+        QStringLiteral(R"([<>:"/\\|?*\x00-\x1F])"));
+    static const QRegularExpression reservedWindowsName(
+        QStringLiteral(R"(^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (outputName == QStringLiteral(".")
+        || outputName == QStringLiteral("..")
+        || outputName.endsWith(QLatin1Char('.'))
+        || outputName.endsWith(QLatin1Char(' '))
+        || invalidCharacters.match(outputName).hasMatch()
+        || reservedWindowsName.match(outputName).hasMatch()) {
+        QMessageBox::warning(
+            const_cast<MainWindow *>(this),
+            QStringLiteral("Invalid Output Name"),
+            QStringLiteral(
+                "Choose a Windows folder name without < > : \" / \\ | ? *, "
+                "reserved device names, or a trailing dot or space."));
         return false;
     }
 
@@ -482,6 +507,7 @@ void MainWindow::submitJob()
     payload.insert(QStringLiteral("modelName"), QStringLiteral("SEGMENT-CACS"));
     payload.insert(QStringLiteral("inputPath"), m_currentJobInputPath);
     payload.insert(QStringLiteral("outputPath"), ui->outputPathLineEdit->text().trimmed());
+    payload.insert(QStringLiteral("outputName"), ui->outputNameLineEdit->text().trimmed());
     payload.insert(QStringLiteral("fileType"), ui->fileTypeComboBox->currentText());
     payload.insert(QStringLiteral("device"), selectedDeviceValue());
 
@@ -529,6 +555,7 @@ void MainWindow::resetForm()
     ui->modelLineEdit->clear();
     ui->inputPathLineEdit->clear();
     ui->outputPathLineEdit->clear();
+    ui->outputNameLineEdit->clear();
     ui->fileTypeComboBox->setCurrentText(QStringLiteral("dcm"));
     ui->deviceComboBox->setCurrentIndex(0);
     ui->enableAdvancedOverridesCheckBox->setChecked(false);

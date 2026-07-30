@@ -33,6 +33,7 @@ public class JobLifecycleService {
         job.setProgress(0);
         job.setInputPath(request.getInputPath());
         job.setOutputPath(request.getOutputPath());
+        job.setOutputName(request.getOutputName());
         job.setDevice(request.getDevice());
         job.setCreatedAt(now);
         job.setUpdatedAt(now);

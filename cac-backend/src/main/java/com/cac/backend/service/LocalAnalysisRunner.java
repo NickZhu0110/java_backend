@@ -93,7 +93,10 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
             validateLocalRequest(request);
             RuntimePaths runtimePaths = validateRuntimePaths();
             Path userExportDirectory =
-                    prepareUserExportDirectory(inputSeries, request.getOutputPath(), jobId);
+                    prepareUserExportDirectory(
+                            inputSeries,
+                            request.getOutputPath(),
+                            request.getOutputName());
 
             Files.createDirectories(outputRoot);
             writeInputMetadata(jobRoot, inputSeries);
@@ -182,7 +185,7 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
     private Path prepareUserExportDirectory(
             Path inputSeries,
             String outputPathValue,
-            Long jobId
+            String outputNameValue
     ) throws IOException {
         if (outputPathValue == null || outputPathValue.isBlank()) {
             throw new IllegalArgumentException("Select an output directory for exported results.");
@@ -200,12 +203,18 @@ public class LocalAnalysisRunner implements AnalysisDispatcher {
         if (!Files.isDirectory(outputBase) || !Files.isWritable(outputBase)) {
             throw new IllegalArgumentException("The selected output directory is not writable.");
         }
+        String outputName = OutputNamePolicy.validate(outputNameValue);
         Path jobExportDirectory =
-                outputBase.resolve("cac_job_" + jobId).toAbsolutePath().normalize();
+                outputBase.resolve(outputName).toAbsolutePath().normalize();
         if (!jobExportDirectory.startsWith(outputBase)) {
             throw new IllegalArgumentException("The job export directory is invalid.");
         }
-        Files.createDirectories(jobExportDirectory);
+        if (Files.exists(jobExportDirectory)) {
+            throw new IllegalArgumentException(
+                    "An output folder named '" + outputName
+                            + "' already exists. Choose a different output name.");
+        }
+        Files.createDirectory(jobExportDirectory);
         return jobExportDirectory;
     }
 

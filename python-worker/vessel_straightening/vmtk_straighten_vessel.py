@@ -37,6 +37,11 @@ ABSCISSAS_ARRAY = "Abscissas"
 NORMALS_ARRAY = "ParallelTransportNormals"
 TANGENT_ARRAY = "FrenetTangent"
 COORDINATE_SYSTEM = "LPS"
+DEFAULT_MINIMUM_PATH_LENGTH_MM = 10.0
+DEFAULT_EXACT_ENDPOINT_TOLERANCE_MM = 0.5
+DEFAULT_ENDPOINT_TOLERANCE_MM = 3.0
+DEFAULT_OVERLAP_DISTANCE_MM = 1.0
+DEFAULT_NEAR_DUPLICATE_OVERLAP = 0.90
 
 
 class VesselProcessingError(RuntimeError):
@@ -87,6 +92,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cross-section-size-mm", type=float, default=32.0)
     parser.add_argument("--cross-section-spacing-mm", type=float, default=0.5)
     parser.add_argument("--longitudinal-spacing-mm", type=float, default=0.5)
+    parser.add_argument(
+        "--minimum-path-length-mm",
+        type=float,
+        default=DEFAULT_MINIMUM_PATH_LENGTH_MM,
+    )
     return parser.parse_args(argv)
 
 
@@ -121,6 +131,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise VesselProcessingError("Cross-section spacing must be positive.")
     if args.longitudinal_spacing_mm <= 0:
         raise VesselProcessingError("Longitudinal spacing must be positive.")
+    if args.minimum_path_length_mm <= 0:
+        raise VesselProcessingError("Minimum path length must be positive.")
     if args.mode == "straighten" and not args.path_id:
         raise VesselProcessingError("--path-id is required in straighten mode.")
 
@@ -483,7 +495,9 @@ def polyline_length(points: np.ndarray) -> float:
     return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
 
 
-def centerline_candidates(centerlines: vtk.vtkPolyData) -> list[dict[str, Any]]:
+def raw_centerline_candidates(
+    centerlines: vtk.vtkPolyData,
+) -> list[dict[str, Any]]:
     radii = centerlines.GetPointData().GetArray(RADIUS_ARRAY)
     candidates: list[dict[str, Any]] = []
     for cell_index in range(centerlines.GetNumberOfCells()):
@@ -505,6 +519,7 @@ def centerline_candidates(centerlines: vtk.vtkPolyData) -> list[dict[str, Any]]:
         candidates.append(
             {
                 "path_id": f"path-{len(candidates) + 1}",
+                "raw_candidate_index": len(candidates) + 1,
                 "cell_id": cell_index,
                 "physical_length_mm": length_mm,
                 "start_point_lps_mm": points[0].tolist(),
@@ -529,6 +544,394 @@ def centerline_candidates(centerlines: vtk.vtkPolyData) -> list[dict[str, Any]]:
     if not candidates:
         raise VesselProcessingError("No valid centerline path candidates were generated.")
     return candidates
+
+
+def canonicalize_candidate_direction(candidate: dict[str, Any]) -> dict[str, Any]:
+    result = dict(candidate)
+    points = np.asarray(result["points_lps_mm"], dtype=np.float64)
+    forward_key = tuple(np.round(points[0], 3)) + tuple(np.round(points[-1], 3))
+    reverse_key = tuple(np.round(points[-1], 3)) + tuple(np.round(points[0], 3))
+    result["direction_reversed_during_canonicalization"] = bool(
+        reverse_key < forward_key
+    )
+    if reverse_key < forward_key:
+        points = points[::-1].copy()
+        result["start_point_lps_mm"] = points[0].tolist()
+        result["end_point_lps_mm"] = points[-1].tolist()
+        result["points_lps_mm"] = points.tolist()
+    return result
+
+
+def point_sequence_signature(candidate: dict[str, Any]) -> tuple[tuple[float, ...], ...]:
+    points = np.asarray(candidate["points_lps_mm"], dtype=np.float64)
+    return tuple(tuple(row) for row in np.round(points, 3))
+
+
+def endpoint_pair_matches(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    tolerance_mm: float,
+) -> bool:
+    first_start = np.asarray(first["start_point_lps_mm"], dtype=np.float64)
+    first_end = np.asarray(first["end_point_lps_mm"], dtype=np.float64)
+    second_start = np.asarray(second["start_point_lps_mm"], dtype=np.float64)
+    second_end = np.asarray(second["end_point_lps_mm"], dtype=np.float64)
+    return bool(
+        np.linalg.norm(first_start - second_start) <= tolerance_mm
+        and np.linalg.norm(first_end - second_end) <= tolerance_mm
+    )
+
+
+def path_overlap_fraction(
+    candidate: dict[str, Any],
+    reference: dict[str, Any],
+    tolerance_mm: float,
+) -> float:
+    points = np.asarray(candidate["points_lps_mm"], dtype=np.float64)
+    reference_points = np.asarray(reference["points_lps_mm"], dtype=np.float64)
+    if len(points) == 0 or len(reference_points) == 0:
+        return 0.0
+    matched = 0
+    block_size = 256
+    for start in range(0, len(points), block_size):
+        block = points[start : start + block_size]
+        distance2 = np.sum(
+            (block[:, np.newaxis, :] - reference_points[np.newaxis, :, :]) ** 2,
+            axis=2,
+        )
+        matched += int(
+            np.count_nonzero(np.min(distance2, axis=1) <= tolerance_mm**2)
+        )
+    return float(matched) / float(len(points))
+
+
+def endpoint_is_near_path(
+    endpoint: Sequence[float],
+    candidate: dict[str, Any],
+    tolerance_mm: float,
+) -> bool:
+    points = np.asarray(candidate["points_lps_mm"], dtype=np.float64)
+    return bool(
+        np.min(
+            np.linalg.norm(
+                points - np.asarray(endpoint, dtype=np.float64), axis=1
+            )
+        )
+        <= tolerance_mm
+    )
+
+
+def endpoint_label(index: int) -> str:
+    value = index
+    label = ""
+    while True:
+        label = chr(ord("A") + value % 26) + label
+        value = value // 26 - 1
+        if value < 0:
+            return label
+
+
+def assign_endpoint_labels(candidates: list[dict[str, Any]], tolerance_mm: float) -> None:
+    endpoint_values: list[np.ndarray] = []
+    for candidate in candidates:
+        endpoint_values.extend(
+            [
+                np.asarray(candidate["start_point_lps_mm"], dtype=np.float64),
+                np.asarray(candidate["end_point_lps_mm"], dtype=np.float64),
+            ]
+        )
+    clusters: list[list[np.ndarray]] = []
+    for endpoint in sorted(endpoint_values, key=lambda point: tuple(point.tolist())):
+        for cluster in clusters:
+            centroid = np.mean(cluster, axis=0)
+            if np.linalg.norm(endpoint - centroid) <= tolerance_mm:
+                cluster.append(endpoint)
+                break
+        else:
+            clusters.append([endpoint])
+    centroids = [np.mean(cluster, axis=0) for cluster in clusters]
+    for candidate in candidates:
+        labels: list[str] = []
+        for key in ("start_point_lps_mm", "end_point_lps_mm"):
+            endpoint = np.asarray(candidate[key], dtype=np.float64)
+            cluster_index = int(
+                np.argmin(
+                    [np.linalg.norm(endpoint - centroid) for centroid in centroids]
+                )
+            )
+            labels.append(endpoint_label(cluster_index))
+        candidate["start_endpoint_id"] = labels[0]
+        candidate["end_endpoint_id"] = labels[1]
+        candidate["endpoint_pair_label"] = (
+            f"endpoint {labels[0]} \u2192 endpoint {labels[1]}"
+        )
+
+
+def branch_points_for_candidates(
+    candidates: list[dict[str, Any]],
+    quantization_mm: float = 1.0,
+) -> list[np.ndarray]:
+    adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
+    for candidate in candidates:
+        points = np.asarray(candidate["points_lps_mm"], dtype=np.float64)
+        keys = [
+            tuple(int(round(value / quantization_mm)) for value in point)
+            for point in points
+        ]
+        for first, second in zip(keys, keys[1:]):
+            if first == second:
+                continue
+            adjacency.setdefault(first, set()).add(second)
+            adjacency.setdefault(second, set()).add(first)
+    raw_branch_points = [
+        np.asarray(key, dtype=np.float64) * quantization_mm
+        for key, neighbors in adjacency.items()
+        if len(neighbors) > 2
+    ]
+    clusters: list[list[np.ndarray]] = []
+    for point in raw_branch_points:
+        for cluster in clusters:
+            if np.linalg.norm(point - np.mean(cluster, axis=0)) <= 2.0:
+                cluster.append(point)
+                break
+        else:
+            clusters.append([point])
+    return [np.mean(cluster, axis=0) for cluster in clusters]
+
+
+def filter_centerline_candidates(
+    raw_candidates: list[dict[str, Any]],
+    minimum_length_mm: float = DEFAULT_MINIMUM_PATH_LENGTH_MM,
+    exact_endpoint_tolerance_mm: float = DEFAULT_EXACT_ENDPOINT_TOLERANCE_MM,
+    endpoint_tolerance_mm: float = DEFAULT_ENDPOINT_TOLERANCE_MM,
+    overlap_distance_mm: float = DEFAULT_OVERLAP_DISTANCE_MM,
+    near_duplicate_overlap: float = DEFAULT_NEAR_DUPLICATE_OVERLAP,
+) -> dict[str, Any]:
+    canonical = [
+        canonicalize_candidate_direction(candidate)
+        for candidate in raw_candidates
+    ]
+    audit_counts = {
+        "raw_candidate_count": len(canonical),
+        "exact_duplicate_count": 0,
+        "reverse_duplicate_count": 0,
+        "duplicate_endpoint_pair_count": 0,
+        "near_duplicate_count": 0,
+        "partial_subpath_count": 0,
+        "short_minor_count": 0,
+    }
+    excluded: list[dict[str, Any]] = []
+    unique_sequences: list[dict[str, Any]] = []
+    signatures: dict[tuple[tuple[float, ...], ...], dict[str, Any]] = {}
+    for candidate in canonical:
+        signature = point_sequence_signature(candidate)
+        if signature in signatures:
+            duplicate = dict(candidate)
+            was_reversed = bool(
+                candidate.get("direction_reversed_during_canonicalization")
+                != signatures[signature].get(
+                    "direction_reversed_during_canonicalization"
+                )
+            )
+            reason = "reverse_duplicate" if was_reversed else "exact_duplicate"
+            duplicate["selection_status"] = "excluded"
+            duplicate["exclusion_reason"] = reason
+            duplicate["representative_path_id"] = signatures[signature]["path_id"]
+            excluded.append(duplicate)
+            audit_counts[f"{reason}_count"] += 1
+            continue
+        signatures[signature] = candidate
+        unique_sequences.append(candidate)
+
+    ordered = sorted(
+        unique_sequences,
+        key=lambda item: (
+            -float(item["physical_length_mm"]),
+            tuple(item["start_point_lps_mm"]),
+            tuple(item["end_point_lps_mm"]),
+        ),
+    )
+    endpoint_unique: list[dict[str, Any]] = []
+    for candidate in ordered:
+        representative = next(
+            (
+                retained
+                for retained in endpoint_unique
+                if endpoint_pair_matches(
+                    candidate, retained, exact_endpoint_tolerance_mm
+                )
+            ),
+            None,
+        )
+        if representative is not None:
+            duplicate = dict(candidate)
+            duplicate["selection_status"] = "excluded"
+            duplicate["exclusion_reason"] = "duplicate_endpoint_pair"
+            duplicate["representative_path_id"] = representative["path_id"]
+            excluded.append(duplicate)
+            audit_counts["duplicate_endpoint_pair_count"] += 1
+        else:
+            endpoint_unique.append(candidate)
+
+    representatives: list[dict[str, Any]] = []
+    for candidate in endpoint_unique:
+        near_duplicate = None
+        for retained in representatives:
+            shorter, longer = (
+                (candidate, retained)
+                if candidate["physical_length_mm"]
+                <= retained["physical_length_mm"]
+                else (retained, candidate)
+            )
+            overlap = path_overlap_fraction(
+                shorter, longer, overlap_distance_mm
+            )
+            if (
+                overlap >= near_duplicate_overlap
+                and endpoint_pair_matches(
+                    shorter, longer, endpoint_tolerance_mm
+                )
+            ):
+                near_duplicate = retained
+                break
+        if near_duplicate is not None:
+            duplicate = dict(candidate)
+            duplicate["selection_status"] = "excluded"
+            duplicate["exclusion_reason"] = "near_duplicate"
+            duplicate["representative_path_id"] = near_duplicate["path_id"]
+            excluded.append(duplicate)
+            audit_counts["near_duplicate_count"] += 1
+        else:
+            representatives.append(candidate)
+
+    longest = max(
+        representatives,
+        key=lambda item: float(item["physical_length_mm"]),
+    )
+    primary: list[dict[str, Any]] = []
+    minor: list[dict[str, Any]] = []
+    for candidate in representatives:
+        candidate = dict(candidate)
+        candidate["shared_with_longest_path_percentage"] = (
+            100.0
+            * path_overlap_fraction(
+                candidate, longest, overlap_distance_mm
+            )
+        )
+        if float(candidate["physical_length_mm"]) < minimum_length_mm:
+            candidate["selection_status"] = "minor"
+            candidate["minor_reason"] = "below_minimum_length"
+            minor.append(candidate)
+            audit_counts["short_minor_count"] += 1
+            continue
+        partial_representative = next(
+            (
+                other
+                for other in representatives
+                if other is not candidate
+                and float(other["physical_length_mm"])
+                > float(candidate["physical_length_mm"])
+                and path_overlap_fraction(
+                    candidate, other, overlap_distance_mm
+                )
+                >= near_duplicate_overlap
+                and endpoint_is_near_path(
+                    candidate["start_point_lps_mm"],
+                    other,
+                    endpoint_tolerance_mm,
+                )
+                and endpoint_is_near_path(
+                    candidate["end_point_lps_mm"],
+                    other,
+                    endpoint_tolerance_mm,
+                )
+            ),
+            None,
+        )
+        if partial_representative is not None:
+            candidate["selection_status"] = "minor"
+            candidate["minor_reason"] = "partial_subpath"
+            candidate["representative_path_id"] = partial_representative["path_id"]
+            minor.append(candidate)
+            audit_counts["partial_subpath_count"] += 1
+        else:
+            candidate["selection_status"] = "primary"
+            primary.append(candidate)
+
+    primary.sort(
+        key=lambda item: (
+            -float(item["physical_length_mm"]),
+            tuple(item["start_point_lps_mm"]),
+            tuple(item["end_point_lps_mm"]),
+        )
+    )
+    minor.sort(
+        key=lambda item: (
+            -float(item["physical_length_mm"]),
+            tuple(item["start_point_lps_mm"]),
+            tuple(item["end_point_lps_mm"]),
+        )
+    )
+    selectable = primary + minor
+    assign_endpoint_labels(selectable, endpoint_tolerance_mm)
+    branch_points = branch_points_for_candidates(selectable)
+    for display_index, candidate in enumerate(selectable, start=1):
+        candidate["display_index"] = display_index
+        path_points = np.asarray(candidate["points_lps_mm"], dtype=np.float64)
+        traversed = [
+            point
+            for point in branch_points
+            if float(
+                np.min(np.linalg.norm(path_points - point, axis=1))
+            )
+            <= 1.5
+        ]
+        candidate["branch_point_count"] = len(traversed)
+        candidate["branch_points_lps_mm"] = [
+            point.tolist() for point in traversed
+        ]
+        candidate["display_label"] = (
+            f"Path {display_index} \u2014 "
+            f"{candidate['physical_length_mm']:.1f} mm \u2014 "
+            f"{candidate['endpoint_pair_label']}"
+        )
+
+    audit_counts["primary_path_count"] = len(primary)
+    audit_counts["minor_path_count"] = len(minor)
+    return {
+        "primary_paths": primary,
+        "minor_paths": minor,
+        "candidate_paths": selectable,
+        "excluded_candidates": excluded,
+        "all_paths": selectable + excluded,
+        "branch_points_lps_mm": [
+            point.tolist() for point in branch_points
+        ],
+        "filtering_summary": {
+            **audit_counts,
+            "thresholds": {
+                "minimum_physical_length_mm": minimum_length_mm,
+                "exact_endpoint_pair_tolerance_mm": (
+                    exact_endpoint_tolerance_mm
+                ),
+                "endpoint_tolerance_mm": endpoint_tolerance_mm,
+                "overlap_distance_mm": overlap_distance_mm,
+                "near_duplicate_shorter_path_overlap_fraction": (
+                    near_duplicate_overlap
+                ),
+            },
+        },
+    }
+
+
+def centerline_candidates(
+    centerlines: vtk.vtkPolyData,
+    minimum_length_mm: float = DEFAULT_MINIMUM_PATH_LENGTH_MM,
+) -> dict[str, Any]:
+    return filter_centerline_candidates(
+        raw_centerline_candidates(centerlines),
+        minimum_length_mm=minimum_length_mm,
+    )
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -560,6 +963,7 @@ def analyze(
     label_value: int,
     component_rank: int,
     output_dir: Path,
+    minimum_path_length_mm: float = DEFAULT_MINIMUM_PATH_LENGTH_MM,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     emit_progress("read", 5, "Reading CT and categorical segmentation")
@@ -574,7 +978,10 @@ def analyze(
     emit_progress("centerline", 45, "Extracting endpoint candidates with VMTK")
     centerlines, endpoints, warnings = extract_vmtk_centerline_tree(surface)
     emit_progress("paths", 80, "Building selectable centerline paths")
-    candidates = centerline_candidates(centerlines)
+    candidate_result = centerline_candidates(
+        centerlines, minimum_path_length_mm
+    )
+    candidates = candidate_result["candidate_paths"]
 
     write_polydata(output_dir / "centerline_tree.vtp", centerlines)
     tree_payload = {
@@ -604,7 +1011,20 @@ def analyze(
         "selected_numeric_label": label_value,
         "selected_component": component_rank,
         "component_statistics": [asdict(item) for item in statistics],
-        "candidate_paths": candidates,
+        "candidate_generation": {
+            "strategy": "single_vmtk_source_to_each_network_target",
+            "source_count": sum(
+                endpoint.get("role") == "source"
+                for endpoint in endpoints
+            ),
+            "target_count": sum(
+                endpoint.get("role") == "target"
+                for endpoint in endpoints
+            ),
+            "every_endpoint_to_endpoint_pair": False,
+            "raw_centerline_cell_count": centerlines.GetNumberOfLines(),
+        },
+        **candidate_result,
         "warnings": warnings,
     }
     write_json(output_dir / "centerline_candidates.json", candidates_payload)
@@ -613,6 +1033,9 @@ def analyze(
         "selected_numeric_label": label_value,
         "selected_component": component_rank,
         "candidate_path_count": len(candidates),
+        "primary_path_count": len(candidate_result["primary_paths"]),
+        "minor_path_count": len(candidate_result["minor_paths"]),
+        "filtering_summary": candidate_result["filtering_summary"],
         "centerline_tree_path": str(output_dir / "centerline_tree.json"),
         "centerline_candidates_path": str(
             output_dir / "centerline_candidates.json"
@@ -830,6 +1253,7 @@ def straighten(
             label_value,
             component_rank,
             output_dir,
+            DEFAULT_MINIMUM_PATH_LENGTH_MM,
         )
     payload = load_candidates(candidates_path)
     if int(payload.get("selected_numeric_label", -1)) != label_value:
@@ -878,8 +1302,12 @@ def straighten(
     ct_float = sitk.Cast(ct, sitk.sitkFloat32)
     vtk_ct = sitk_to_vtk_image(ct_float, vtk.VTK_FLOAT)
     vtk_mask = sitk_to_vtk_image(component, vtk.VTK_UNSIGNED_CHAR)
+    # Include both physical FOV endpoints.  With the default 32 mm / 0.5 mm
+    # geometry this yields 65 samples, an exact center voxel, and a 32 mm
+    # distance between the first and last sample.
     pixel_count = max(
-        2, int(round(cross_section_size_mm / cross_section_spacing_mm))
+        3,
+        int(round(cross_section_size_mm / cross_section_spacing_mm)) + 1,
     )
 
     emit_progress("vmtk-curved-mpr", 35, "Validating the VMTK Curved MPR runtime")
@@ -945,6 +1373,17 @@ def straighten(
         straightened_ct.shape[0],
     ):
         raise VesselProcessingError("Written Curved MPR dimensions are invalid.")
+    actual_cross_section_extent_mm = (
+        (ct_roundtrip.GetSize()[0] - 1) * ct_roundtrip.GetSpacing()[0]
+    )
+    if not math.isclose(
+        actual_cross_section_extent_mm,
+        cross_section_size_mm,
+        abs_tol=0.5 * cross_section_spacing_mm + 1.0e-6,
+    ):
+        raise VesselProcessingError(
+            "Written Curved MPR field of view does not match the requested size."
+        )
 
     duration = time.perf_counter() - started
     warnings = list(payload.get("warnings", []))
@@ -966,7 +1405,16 @@ def straighten(
         "path_length_mm": path_length_mm,
         "output_dimensions": list(ct_roundtrip.GetSize()),
         "output_spacing_mm": list(ct_roundtrip.GetSpacing()),
+        "axis_convention": {
+            "vtk_dimensions_xyz": list(official_dimensions),
+            "numpy_shape_zyx": list(straightened_ct.shape),
+            "simpleitk_size_xyz": list(ct_roundtrip.GetSize()),
+            "nrrd_size_xyz": list(ct_roundtrip.GetSize()),
+            "qt_vtk_dimensions_xyz": list(ct_roundtrip.GetSize()),
+            "complete_xy_cross_section_for_every_z": True,
+        },
         "cross_section_size_mm": cross_section_size_mm,
+        "actual_cross_section_extent_mm": actual_cross_section_extent_mm,
         "cross_section_spacing_mm": cross_section_spacing_mm,
         "longitudinal_spacing_mm": longitudinal_spacing_mm,
         "outside_ct_value_hu": -1024.0,
@@ -1022,6 +1470,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.label,
             args.component,
             output_dir,
+            args.minimum_path_length_mm,
         )
     return straighten(
         args.ct.resolve(),

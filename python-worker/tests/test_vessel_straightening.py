@@ -224,6 +224,61 @@ def test_process_failure_and_cancellation_exit_contract(
     assert cancelled_exit == 130
 
 
+def test_candidate_filtering_audit_and_primary_minor_groups() -> None:
+    def candidate(path_id: str, points: list[tuple[float, float, float]]):
+        values = np.asarray(points, dtype=np.float64)
+        return {
+            "path_id": path_id,
+            "physical_length_mm": pipeline.polyline_length(values),
+            "start_point_lps_mm": values[0].tolist(),
+            "end_point_lps_mm": values[-1].tolist(),
+            "points_lps_mm": values.tolist(),
+            "point_count": len(values),
+        }
+
+    trunk = [(float(x), 0.0, 0.0) for x in range(21)]
+    curved_same_endpoints = [
+        (float(x), 2.0 * math.sin(math.pi * x / 20.0), 0.0)
+        for x in range(21)
+    ]
+    near = [
+        (point[0] + 0.8, point[1] + 0.1, point[2])
+        for point in curved_same_endpoints
+    ]
+    partial = curved_same_endpoints[5:16]
+    short = curved_same_endpoints[:5]
+    branch = [
+        *((float(x), 0.0, 0.0) for x in range(11)),
+        *((10.0 + float(x), float(x), 0.0) for x in range(1, 11)),
+    ]
+    result = pipeline.filter_centerline_candidates(
+        [
+            candidate("path-1", trunk),
+            candidate("path-2", trunk),
+            candidate("path-3", list(reversed(trunk))),
+            candidate("path-4", curved_same_endpoints),
+            candidate("path-5", near),
+            candidate("path-6", partial),
+            candidate("path-7", short),
+            candidate("path-8", branch),
+        ],
+        minimum_length_mm=8.0,
+    )
+    summary = result["filtering_summary"]
+    assert summary["raw_candidate_count"] == 8
+    assert summary["exact_duplicate_count"] == 1
+    assert summary["reverse_duplicate_count"] == 1
+    assert summary["duplicate_endpoint_pair_count"] == 1
+    assert summary["near_duplicate_count"] == 1
+    assert summary["partial_subpath_count"] == 1
+    assert summary["short_minor_count"] == 1
+    assert summary["primary_path_count"] == 2
+    assert summary["minor_path_count"] == 2
+    assert all(path["display_label"].startswith("Path ") for path in result["candidate_paths"])
+    assert all("endpoint_pair_label" in path for path in result["candidate_paths"])
+    assert all("branch_point_count" in path for path in result["candidate_paths"])
+
+
 @pytest.mark.parametrize(
     "points_factory", [straight_points, curved_points], ids=["straight", "curved"]
 )
@@ -256,11 +311,42 @@ def test_two_stage_pipeline_and_output_geometry(
         Path(result["straightened_vessel_mask_path"])
     )
     assert ct_output.GetSize() == mask_output.GetSize()
-    assert ct_output.GetSize()[0:2] == (16, 16)
+    assert ct_output.GetSize()[0:2] == (17, 17)
     assert ct_output.GetSpacing() == pytest.approx((1.0, 1.0, 1.0))
-    mask_values = set(np.unique(sitk.GetArrayFromImage(mask_output)))
+    ct_array = sitk.GetArrayFromImage(ct_output)
+    mask_array = sitk.GetArrayFromImage(mask_output)
+    assert ct_array.shape == (
+        ct_output.GetSize()[2],
+        ct_output.GetSize()[1],
+        ct_output.GetSize()[0],
+    )
+    assert ct_array.shape[1:] == (17, 17)
+    assert np.all(np.isfinite(ct_array))
+    mask_values = set(np.unique(mask_array))
     assert mask_values.issubset({0, 1})
     assert 1 in mask_values
+    nonempty_cross_sections = mask_array.sum(axis=(1, 2)) > 0
+    assert int(nonempty_cross_sections.sum()) >= 2
+    assert int(mask_array.sum(axis=(1, 2)).max()) > 1
+    center_index = ct_output.GetSize()[0] // 2
+    centerline_mask = mask_array[:, center_index, center_index] > 0
+    assert int(centerline_mask.sum()) >= 2
+    assert np.median(
+        ct_array[centerline_mask, center_index, center_index]
+    ) > 300.0
+    longitudinal_mask_widths = mask_array[:, center_index, :].sum(axis=1)
+    assert int(longitudinal_mask_widths.max()) > 1
+    metadata = json.loads(
+        (output_dir / "straightening_metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["axis_convention"]["numpy_shape_zyx"] == list(ct_array.shape)
+    assert metadata["axis_convention"]["simpleitk_size_xyz"] == list(
+        ct_output.GetSize()
+    )
+    assert metadata["axis_convention"][
+        "complete_xy_cross_section_for_every_z"
+    ]
+    assert metadata["actual_cross_section_extent_mm"] == pytest.approx(16.0)
 
 
 def test_branching_surface_produces_candidate_paths(tmp_path: Path) -> None:

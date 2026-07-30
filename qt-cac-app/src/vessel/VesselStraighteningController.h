@@ -25,6 +25,7 @@ public:
     bool isRunning() const;
     QString outputDirectory() const;
     QJsonArray candidatePaths() const;
+    QJsonObject candidateAnalysis() const;
     QJsonObject latestResult() const;
 
 signals:
@@ -68,6 +69,7 @@ private:
     int m_label = 0;
     int m_component = 0;
     QJsonArray m_candidatePaths;
+    QJsonObject m_candidateAnalysis;
     QJsonObject m_lastProcessResult;
     QJsonObject m_latestResult;
 };

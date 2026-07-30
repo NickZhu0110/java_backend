@@ -2,7 +2,9 @@ package com.cac.backend.service;
 
 import com.cac.backend.dto.CreateJobRequest;
 import com.cac.backend.entity.AnalysisJob;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class JobService {
@@ -19,6 +21,12 @@ public class JobService {
     }
 
     public Long createJob(CreateJobRequest request) {
+        try {
+            request.setOutputName(OutputNamePolicy.validate(request.getOutputName()));
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, exception.getMessage(), exception);
+        }
         AnalysisJob job = jobLifecycleService.createJob(request);
         analysisDispatcher.dispatch(job, request);
         return job.getId();

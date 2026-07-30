@@ -696,8 +696,11 @@ public class CacResultService {
         if (outputBase.equals(legacyManagedOutput)) {
             return null;
         }
+        String outputFolderName = job.getOutputName() == null || job.getOutputName().isBlank()
+                ? "cac_job_" + job.getId()
+                : OutputNamePolicy.validate(job.getOutputName());
         Path exportDirectory = outputBase
-                .resolve("cac_job_" + job.getId())
+                .resolve(outputFolderName)
                 .toAbsolutePath()
                 .normalize();
         if (!exportDirectory.startsWith(outputBase)) {

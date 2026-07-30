@@ -16,4 +16,6 @@ public class AnalysisRequestedEvent {
     private String inputPath;
 
     private String outputPath;
+
+    private String outputName;
 }

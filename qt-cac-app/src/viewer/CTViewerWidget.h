@@ -6,6 +6,8 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QLabel>
 #include <QPointF>
 #include <QPushButton>
@@ -221,9 +223,16 @@ private:
     void startVesselAnalysis();
     void startVesselPath(const QString &pathId);
     void handleVesselCandidates(const QJsonArray &candidates);
+    void rebuildVesselPathSelector();
+    void handleVesselPathSelection(int comboBoxIndex);
+    void previewSelectedVesselPath();
+    void generateSelectedVesselPath();
+    void updateVesselPathDetails();
+    QJsonObject selectedVesselPathCandidate() const;
+    bool candidatePoints(
+        const QJsonObject &candidate,
+        std::vector<std::array<double, 3>> *points) const;
     void showStraightenedVesselResult(const QJsonObject &result);
-    bool displayCenterlineJson(const QString &path,
-                               QString *errorMessage = nullptr);
     void invalidateVesselStraightening();
     void setMultiStructurePreviewUiActive(bool active);
     void configureNiftiReviewMpr();
@@ -300,10 +309,19 @@ private:
     QComboBox *m_vesselComponentComboBox = nullptr;
     QLabel *m_vesselSelectionStatusLabel = nullptr;
     QPushButton *m_straightenSelectedVesselButton = nullptr;
+    QComboBox *m_vesselPathComboBox = nullptr;
+    QCheckBox *m_showAllVesselPathsCheckBox = nullptr;
+    QCheckBox *m_showMinorVesselPathsCheckBox = nullptr;
+    QPushButton *m_generateVesselCprButton = nullptr;
+    QLabel *m_vesselPathDetailsLabel = nullptr;
     QProgressBar *m_vesselProgressBar = nullptr;
     QPushButton *m_cancelVesselProcessingButton = nullptr;
     VesselStraighteningController *m_vesselStraighteningController = nullptr;
     StraightenedVesselWindow *m_straightenedVesselWindow = nullptr;
+    QJsonArray m_primaryVesselPaths;
+    QJsonArray m_minorVesselPaths;
+    QJsonArray m_selectableVesselPaths;
+    QJsonObject m_vesselPathFilteringSummary;
     std::vector<MultiStructureControl> m_multiStructureControls;
     QGridLayout *m_viewGridLayout = nullptr;
     QWidget *m_axialPanel = nullptr;

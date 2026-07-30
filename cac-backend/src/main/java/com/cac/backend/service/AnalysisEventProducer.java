@@ -36,7 +36,8 @@ public class AnalysisEventProducer implements AnalysisDispatcher {
                 job.getId(),
                 job.getModelName(),
                 job.getInputPath(),
-                job.getOutputPath()
+                job.getOutputPath(),
+                job.getOutputName()
         );
 
         kafkaTemplate.send(

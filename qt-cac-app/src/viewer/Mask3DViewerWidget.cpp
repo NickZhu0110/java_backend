@@ -2249,13 +2249,127 @@ void Mask3DViewerWidget::setMultiStructureOpacity(int labelValue, double opacity
 void Mask3DViewerWidget::setNiftiCenterline(
     const std::vector<std::array<double, 3>> &pointsLpsMm)
 {
+    setNiftiCenterlineCandidates({pointsLpsMm}, 0, false);
+}
+
+bool Mask3DViewerWidget::setNiftiCenterlineCandidates(
+    const std::vector<std::vector<std::array<double, 3>>> &pathsLpsMm,
+    int selectedIndex,
+    bool showAllCandidates)
+{
     clearNiftiCenterline();
-    if (!m_multiStructurePreviewActive || pointsLpsMm.size() < 2) {
-        return;
+    if (!m_multiStructurePreviewActive || pathsLpsMm.empty()) {
+        return false;
+    }
+    m_niftiCandidatePathsLpsMm = pathsLpsMm;
+    m_showAllNiftiCandidates = showAllCandidates;
+    for (const auto &path : pathsLpsMm) {
+        if (path.size() < 2) {
+            m_niftiCandidateCenterlineActors.push_back(nullptr);
+            continue;
+        }
+        vtkNew<vtkPoints> points;
+        for (const auto &pointLps : path) {
+            points->InsertNextPoint(
+                -pointLps[0], -pointLps[1], pointLps[2]);
+        }
+        vtkNew<vtkPolyLine> line;
+        line->GetPointIds()->SetNumberOfIds(
+            static_cast<vtkIdType>(path.size()));
+        for (vtkIdType index = 0;
+             index < static_cast<vtkIdType>(path.size());
+             ++index) {
+            line->GetPointIds()->SetId(index, index);
+        }
+        vtkNew<vtkCellArray> lines;
+        lines->InsertNextCell(line);
+        vtkNew<vtkPolyData> data;
+        data->SetPoints(points);
+        data->SetLines(lines);
+        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputData(data);
+        mapper->ScalarVisibilityOff();
+        auto actor = vtkSmartPointer<vtkActor>::New();
+        actor->SetMapper(mapper);
+        actor->SetPickable(false);
+        actor->SetUseBounds(false);
+        actor->GetProperty()->SetColor(0.45, 0.65, 0.72);
+        actor->GetProperty()->SetOpacity(0.38);
+        actor->GetProperty()->SetLineWidth(1.2);
+        actor->GetProperty()->LightingOff();
+        actor->SetVisibility(showAllCandidates);
+        m_renderer->AddActor(actor);
+        m_niftiCandidateCenterlineActors.push_back(actor);
+    }
+    m_selectedNiftiCandidateIndex = selectedIndex;
+    const bool selected = rebuildNiftiSelectedCenterline();
+    m_renderWindow->Render();
+    return selected;
+}
+
+bool Mask3DViewerWidget::selectNiftiCenterlineCandidate(
+    int selectedIndex)
+{
+    if (selectedIndex < 0
+        || static_cast<size_t>(selectedIndex)
+            >= m_niftiCandidatePathsLpsMm.size()) {
+        clearNiftiSelectedCenterline();
+        m_selectedNiftiCandidateIndex = -1;
+        m_renderWindow->Render();
+        return false;
+    }
+    clearNiftiSelectedCenterline();
+    m_selectedNiftiCandidateIndex = selectedIndex;
+    const bool selected = rebuildNiftiSelectedCenterline();
+    m_renderWindow->Render();
+    return selected;
+}
+
+void Mask3DViewerWidget::setAllNiftiCenterlineCandidatesVisible(
+    bool visible)
+{
+    m_showAllNiftiCandidates = visible;
+    for (vtkActor *actor : m_niftiCandidateCenterlineActors) {
+        if (actor) {
+            actor->SetVisibility(visible);
+        }
+    }
+    if (m_niftiCenterlineActor) {
+        m_niftiCenterlineActor->SetVisibility(true);
+    }
+    for (vtkActor *actor : m_niftiCenterlineEndpointActors) {
+        if (actor) {
+            actor->SetVisibility(true);
+        }
+    }
+    m_renderWindow->Render();
+}
+
+bool Mask3DViewerWidget::hasSelectedNiftiCenterlineCandidate() const
+{
+    return m_selectedNiftiCandidateIndex >= 0
+        && m_niftiCenterlineActor
+        && m_niftiCenterlineActor->GetVisibility()
+        && m_niftiCenterlineEndpointActors.size() == 2
+        && m_niftiCenterlineEndpointActors[0]->GetVisibility()
+        && m_niftiCenterlineEndpointActors[1]->GetVisibility();
+}
+
+bool Mask3DViewerWidget::rebuildNiftiSelectedCenterline()
+{
+    if (m_selectedNiftiCandidateIndex < 0
+        || static_cast<size_t>(m_selectedNiftiCandidateIndex)
+            >= m_niftiCandidatePathsLpsMm.size()) {
+        return false;
+    }
+    const auto &pointsLpsMm =
+        m_niftiCandidatePathsLpsMm[
+            static_cast<size_t>(m_selectedNiftiCandidateIndex)];
+    if (pointsLpsMm.size() < 2) {
+        return false;
     }
     vtkNew<vtkPoints> points;
     for (const auto &pointLps : pointsLpsMm) {
-        // SimpleITK reports physical LPS; this viewer renders NIfTI in RAS.
         points->InsertNextPoint(
             -pointLps[0], -pointLps[1], pointLps[2]);
     }
@@ -2280,11 +2394,12 @@ void Mask3DViewerWidget::setNiftiCenterline(
     m_niftiCenterlineActor->SetMapper(m_niftiCenterlineMapper);
     m_niftiCenterlineActor->SetPickable(false);
     m_niftiCenterlineActor->SetUseBounds(false);
-    m_niftiCenterlineActor->GetProperty()->SetColor(1.0, 0.92, 0.1);
-    m_niftiCenterlineActor->GetProperty()->SetLineWidth(4.0);
+    m_niftiCenterlineActor->GetProperty()->SetColor(1.0, 0.88, 0.05);
+    m_niftiCenterlineActor->GetProperty()->SetLineWidth(5.0);
     m_niftiCenterlineActor->GetProperty()->LightingOff();
     m_renderer->AddActor(m_niftiCenterlineActor);
 
+    int endpointOrdinal = 0;
     for (vtkIdType endpointIndex :
          {vtkIdType{0},
           static_cast<vtkIdType>(pointsLpsMm.size() - 1)}) {
@@ -2301,13 +2416,18 @@ void Mask3DViewerWidget::setNiftiCenterline(
         actor->SetMapper(mapper);
         actor->SetPickable(false);
         actor->SetUseBounds(false);
-        actor->GetProperty()->SetColor(1.0, 0.35, 0.05);
+        if (endpointOrdinal == 0) {
+            actor->GetProperty()->SetColor(0.1, 0.95, 0.25);
+        } else {
+            actor->GetProperty()->SetColor(0.95, 0.12, 0.1);
+        }
         actor->GetProperty()->SetAmbient(0.35);
         m_renderer->AddActor(actor);
         m_niftiCenterlineEndpointActors.push_back(actor);
+        ++endpointOrdinal;
     }
     m_renderer->ResetCameraClippingRange();
-    m_renderWindow->Render();
+    return true;
 }
 
 void Mask3DViewerWidget::setNiftiCenterlineVisible(bool visible)
@@ -2323,7 +2443,7 @@ void Mask3DViewerWidget::setNiftiCenterlineVisible(bool visible)
     m_renderWindow->Render();
 }
 
-void Mask3DViewerWidget::clearNiftiCenterline()
+void Mask3DViewerWidget::clearNiftiSelectedCenterline()
 {
     if (m_niftiCenterlineActor) {
         m_renderer->RemoveActor(m_niftiCenterlineActor);
@@ -2337,6 +2457,20 @@ void Mask3DViewerWidget::clearNiftiCenterline()
     m_niftiCenterlineActor = nullptr;
     m_niftiCenterlineMapper = nullptr;
     m_niftiCenterlineData = nullptr;
+}
+
+void Mask3DViewerWidget::clearNiftiCenterline()
+{
+    clearNiftiSelectedCenterline();
+    for (vtkActor *actor : m_niftiCandidateCenterlineActors) {
+        if (actor) {
+            m_renderer->RemoveActor(actor);
+        }
+    }
+    m_niftiCandidateCenterlineActors.clear();
+    m_niftiCandidatePathsLpsMm.clear();
+    m_selectedNiftiCandidateIndex = -1;
+    m_showAllNiftiCandidates = true;
     if (m_renderWindow) {
         m_renderWindow->Render();
     }

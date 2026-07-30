@@ -10,8 +10,11 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -27,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -40,6 +44,46 @@ bool imageIsValid(vtkImageData *image)
     image->GetDimensions(dimensions);
     return dimensions[0] > 0 && dimensions[1] > 0
         && dimensions[2] > 0;
+}
+
+using Vector3 = std::array<double, 3>;
+
+Vector3 subtract(const Vector3 &left, const Vector3 &right)
+{
+    return {
+        left[0] - right[0],
+        left[1] - right[1],
+        left[2] - right[2]
+    };
+}
+
+double dot(const Vector3 &left, const Vector3 &right)
+{
+    return left[0] * right[0]
+        + left[1] * right[1]
+        + left[2] * right[2];
+}
+
+Vector3 cross(const Vector3 &left, const Vector3 &right)
+{
+    return {
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0]
+    };
+}
+
+Vector3 normalized(const Vector3 &value)
+{
+    const double length = std::sqrt(dot(value, value));
+    if (length < 1.0e-12) {
+        return {1.0, 0.0, 0.0};
+    }
+    return {
+        value[0] / length,
+        value[1] / length,
+        value[2] / length
+    };
 }
 
 } // namespace
@@ -72,13 +116,28 @@ StraightenedVesselWindow::StraightenedVesselWindow(QWidget *parent)
     auto *controlRow = new QHBoxLayout;
     controlRow->addWidget(new QLabel(QStringLiteral("Longitudinal:"), this));
     m_longitudinalModeComboBox = new QComboBox(this);
-    m_longitudinalModeComboBox->addItem(QStringLiteral("Center slice"));
-    m_longitudinalModeComboBox->addItem(QStringLiteral("MIP"));
+    m_longitudinalModeComboBox->addItem(
+        QStringLiteral("Curved CPR \u2014 orientation A"));
+    m_longitudinalModeComboBox->addItem(
+        QStringLiteral("Curved CPR \u2014 orientation B"));
+    m_longitudinalModeComboBox->addItem(
+        QStringLiteral("Straightened MPR \u2014 X-Z"));
+    m_longitudinalModeComboBox->addItem(
+        QStringLiteral("Straightened MPR \u2014 Y-Z"));
+    m_longitudinalModeComboBox->addItem(
+        QStringLiteral("Thin-slab MIP"));
     controlRow->addWidget(m_longitudinalModeComboBox);
+    controlRow->addWidget(new QLabel(QStringLiteral("Slab:"), this));
+    m_slabThicknessSpinBox = new QSpinBox(this);
+    m_slabThicknessSpinBox->setRange(1, 15);
+    m_slabThicknessSpinBox->setSuffix(QStringLiteral(" mm"));
+    m_slabThicknessSpinBox->setValue(5);
+    m_slabThicknessSpinBox->setEnabled(false);
+    controlRow->addWidget(m_slabThicknessSpinBox);
     controlRow->addSpacing(16);
     controlRow->addWidget(new QLabel(QStringLiteral("Window:"), this));
     m_windowWidthSpinBox = new QSpinBox(this);
-    m_windowWidthSpinBox->setRange(1, 4000);
+    m_windowWidthSpinBox->setRange(50, 4000);
     m_windowWidthSpinBox->setValue(700);
     controlRow->addWidget(m_windowWidthSpinBox);
     controlRow->addWidget(new QLabel(QStringLiteral("Level:"), this));
@@ -94,13 +153,13 @@ StraightenedVesselWindow::StraightenedVesselWindow(QWidget *parent)
     mainLayout->addLayout(controlRow);
 
     auto *imagesLayout = new QGridLayout;
-    auto *longitudinalTitle =
-        new QLabel(QStringLiteral("Longitudinal Curved MPR"), this);
-    longitudinalTitle->setAlignment(Qt::AlignCenter);
+    m_longitudinalTitleLabel =
+        new QLabel(QStringLiteral("Curved CPR \u2014 orientation A"), this);
+    m_longitudinalTitleLabel->setAlignment(Qt::AlignCenter);
     auto *crossSectionTitle =
         new QLabel(QStringLiteral("Cross-section (X-Y)"), this);
     crossSectionTitle->setAlignment(Qt::AlignCenter);
-    imagesLayout->addWidget(longitudinalTitle, 0, 0);
+    imagesLayout->addWidget(m_longitudinalTitleLabel, 0, 0);
     imagesLayout->addWidget(crossSectionTitle, 0, 1);
     m_longitudinalLabel = new QLabel(this);
     m_longitudinalLabel->setAlignment(Qt::AlignCenter);
@@ -138,6 +197,11 @@ StraightenedVesselWindow::StraightenedVesselWindow(QWidget *parent)
             this, [this]() { updateImages(); });
     connect(m_longitudinalModeComboBox,
             qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+        m_slabThicknessSpinBox->setEnabled(index == 4);
+        updateImages();
+    });
+    connect(m_slabThicknessSpinBox, qOverload<int>(&QSpinBox::valueChanged),
             this, [this]() { updateImages(); });
     connect(anotherPathButton, &QPushButton::clicked,
             this, &StraightenedVesselWindow::anotherPathRequested);
@@ -177,12 +241,29 @@ bool StraightenedVesselWindow::loadResult(
         }
         return false;
     }
+    if (!readCenterlineFrames(
+            result.value(
+                QStringLiteral("selected_centerline_path")).toString(),
+            errorMessage)) {
+        return false;
+    }
+    if (static_cast<int>(m_centerlinePoints.size()) != ctDimensions[2]) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Centerline sample count (%1) does not match the "
+                "straightened volume Z dimension (%2).")
+                                .arg(m_centerlinePoints.size())
+                                .arg(ctDimensions[2]);
+        }
+        return false;
+    }
     m_ctImage = ct;
     m_maskImage = mask;
     m_result = result;
     m_candidatePaths = candidatePaths;
     m_positionSlider->setRange(0, std::max(0, ctDimensions[2] - 1));
     m_positionSlider->setValue(ctDimensions[2] / 2);
+    m_longitudinalModeComboBox->setCurrentIndex(0);
     updateMetadata();
     updateImages();
     return true;
@@ -240,6 +321,87 @@ bool StraightenedVesselWindow::readNrrd(
     return true;
 }
 
+bool StraightenedVesselWindow::readCenterlineFrames(
+    const QString &path,
+    QString *errorMessage)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Could not read the selected centerline frames: %1")
+                                .arg(file.errorString());
+        }
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError
+        || !document.isObject()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "Selected centerline JSON is invalid: %1")
+                                .arg(parseError.errorString());
+        }
+        return false;
+    }
+    const QJsonObject object = document.object();
+    const auto readVectors =
+        [errorMessage](
+            const QJsonArray &values,
+            const QString &name,
+            std::vector<std::array<double, 3>> *output) {
+        output->clear();
+        output->reserve(static_cast<size_t>(values.size()));
+        for (const QJsonValue &value : values) {
+            const QJsonArray vector = value.toArray();
+            if (vector.size() != 3
+                || !vector.at(0).isDouble()
+                || !vector.at(1).isDouble()
+                || !vector.at(2).isDouble()) {
+                if (errorMessage) {
+                    *errorMessage = QStringLiteral(
+                        "Selected centerline has an invalid %1 entry.")
+                                            .arg(name);
+                }
+                return false;
+            }
+            output->push_back({
+                vector.at(0).toDouble(),
+                vector.at(1).toDouble(),
+                vector.at(2).toDouble()
+            });
+        }
+        return !output->empty();
+    };
+    std::vector<std::array<double, 3>> points;
+    std::vector<std::array<double, 3>> tangents;
+    std::vector<std::array<double, 3>> normals;
+    if (!readVectors(
+            object.value(QStringLiteral("points_lps_mm")).toArray(),
+            QStringLiteral("point"), &points)
+        || !readVectors(
+            object.value(QStringLiteral("frenet_tangents")).toArray(),
+            QStringLiteral("tangent"), &tangents)
+        || !readVectors(
+            object.value(
+                QStringLiteral("parallel_transport_normals")).toArray(),
+            QStringLiteral("parallel-transport normal"), &normals)
+        || points.size() != tangents.size()
+        || points.size() != normals.size()) {
+        if (errorMessage && errorMessage->isEmpty()) {
+            *errorMessage = QStringLiteral(
+                "Selected centerline frame arrays have different lengths.");
+        }
+        return false;
+    }
+    m_centerlinePoints = std::move(points);
+    m_centerlineTangents = std::move(tangents);
+    m_centerlineNormals = std::move(normals);
+    return true;
+}
+
 void StraightenedVesselWindow::updateImages()
 {
     if (!imageIsValid(m_ctImage) || !imageIsValid(m_maskImage)) {
@@ -248,6 +410,10 @@ void StraightenedVesselWindow::updateImages()
     const QImage longitudinal = renderLongitudinal();
     const QImage crossSection =
         renderCrossSection(m_positionSlider->value());
+    if (m_longitudinalTitleLabel) {
+        m_longitudinalTitleLabel->setText(
+            m_longitudinalModeComboBox->currentText());
+    }
     m_longitudinalLabel->setPixmap(
         QPixmap::fromImage(longitudinal).scaled(
             m_longitudinalLabel->size(),
@@ -286,33 +452,299 @@ void StraightenedVesselWindow::updateMetadata()
 
 QImage StraightenedVesselWindow::renderLongitudinal() const
 {
+    switch (m_longitudinalModeComboBox->currentIndex()) {
+    case 0:
+        return renderCurvedCpr(true);
+    case 1:
+        return renderCurvedCpr(false);
+    case 2:
+        return renderStraightenedMpr(true, false);
+    case 3:
+        return renderStraightenedMpr(false, false);
+    case 4:
+        return renderStraightenedMpr(true, true);
+    default:
+        return renderCurvedCpr(true);
+    }
+}
+
+QImage StraightenedVesselWindow::renderCurvedCpr(
+    bool orientationA) const
+{
     int dimensions[3] = {};
     m_ctImage->GetDimensions(dimensions);
-    QImage output(
-        dimensions[0], dimensions[2], QImage::Format_ARGB32);
+    if (m_centerlinePoints.size()
+            != static_cast<size_t>(dimensions[2])
+        || m_centerlineTangents.size() != m_centerlinePoints.size()
+        || m_centerlineNormals.size() != m_centerlinePoints.size()) {
+        return renderStraightenedMpr(orientationA, false);
+    }
+    double spacing[3] = {};
+    m_ctImage->GetSpacing(spacing);
+    const int radialCount =
+        orientationA ? dimensions[0] : dimensions[1];
+    const double radialSpacing =
+        orientationA ? spacing[0] : spacing[1];
+    const double rasterSpacing =
+        std::max(0.05, std::min(radialSpacing, spacing[2]));
+    std::vector<std::array<double, 2>> centers(
+        m_centerlinePoints.size(), {0.0, 0.0});
+    std::vector<double> angles(m_centerlinePoints.size(), 0.0);
+    for (size_t index = 1; index < m_centerlinePoints.size(); ++index) {
+        const double segmentLength =
+            std::sqrt(dot(
+                subtract(
+                    m_centerlinePoints[index],
+                    m_centerlinePoints[index - 1]),
+                subtract(
+                    m_centerlinePoints[index],
+                    m_centerlinePoints[index - 1])));
+        centers[index][0] =
+            centers[index - 1][0]
+            + segmentLength * std::cos(angles[index - 1]);
+        centers[index][1] =
+            centers[index - 1][1]
+            + segmentLength * std::sin(angles[index - 1]);
+
+        const Vector3 previousTangent =
+            normalized(m_centerlineTangents[index - 1]);
+        const Vector3 currentTangent =
+            normalized(m_centerlineTangents[index]);
+        Vector3 normal = m_centerlineNormals[index - 1];
+        const double tangentProjection = dot(normal, previousTangent);
+        for (int axis = 0; axis < 3; ++axis) {
+            normal[axis] -=
+                tangentProjection * previousTangent[axis];
+        }
+        normal = normalized(normal);
+        const Vector3 second =
+            normalized(cross(previousTangent, normal));
+        Vector3 planeNormal = orientationA ? second : normal;
+        if (!orientationA) {
+            for (double &value : planeNormal) {
+                value = -value;
+            }
+        }
+        const double signedTurn = std::atan2(
+            dot(cross(previousTangent, currentTangent), planeNormal),
+            std::clamp(
+                dot(previousTangent, currentTangent), -1.0, 1.0));
+        angles[index] = angles[index - 1] + signedTurn;
+    }
+
+    const double halfWidth =
+        0.5 * static_cast<double>(radialCount - 1) * radialSpacing;
+    double minimumX = std::numeric_limits<double>::infinity();
+    double maximumX = -std::numeric_limits<double>::infinity();
+    double minimumY = std::numeric_limits<double>::infinity();
+    double maximumY = -std::numeric_limits<double>::infinity();
+    for (size_t index = 0; index < centers.size(); ++index) {
+        const double normalX = -std::sin(angles[index]);
+        const double normalY = std::cos(angles[index]);
+        for (double offset : {-halfWidth, halfWidth}) {
+            minimumX = std::min(
+                minimumX, centers[index][0] + offset * normalX);
+            maximumX = std::max(
+                maximumX, centers[index][0] + offset * normalX);
+            minimumY = std::min(
+                minimumY, centers[index][1] + offset * normalY);
+            maximumY = std::max(
+                maximumY, centers[index][1] + offset * normalY);
+        }
+    }
+    constexpr int padding = 4;
+    const int outputWidth = std::max(
+        2,
+        static_cast<int>(std::ceil(
+            (maximumX - minimumX) / rasterSpacing))
+            + 1 + 2 * padding);
+    const int outputHeight = std::max(
+        2,
+        static_cast<int>(std::ceil(
+            (maximumY - minimumY) / rasterSpacing))
+            + 1 + 2 * padding);
+    const size_t outputSize =
+        static_cast<size_t>(outputWidth)
+        * static_cast<size_t>(outputHeight);
+    std::vector<double> accumulatedCt(outputSize, 0.0);
+    std::vector<double> accumulatedWeight(outputSize, 0.0);
+    std::vector<unsigned char> mask(outputSize, 0);
+    const int centerX = dimensions[0] / 2;
     const int centerY = dimensions[1] / 2;
-    const bool useMip = m_longitudinalModeComboBox->currentIndex() == 1;
-    const bool overlay = m_maskOverlayCheckBox->isChecked();
     for (int z = 0; z < dimensions[2]; ++z) {
-        for (int x = 0; x < dimensions[0]; ++x) {
-            double ctValue =
-                m_ctImage->GetScalarComponentAsDouble(x, centerY, z, 0);
-            bool maskValue =
+        const double normalX = -std::sin(angles[static_cast<size_t>(z)]);
+        const double normalY = std::cos(angles[static_cast<size_t>(z)]);
+        for (int radial = 0; radial < radialCount; ++radial) {
+            const double offset =
+                (static_cast<double>(radial)
+                 - 0.5 * static_cast<double>(radialCount - 1))
+                * radialSpacing;
+            const double physicalX =
+                centers[static_cast<size_t>(z)][0] + offset * normalX;
+            const double physicalY =
+                centers[static_cast<size_t>(z)][1] + offset * normalY;
+            const double rasterX =
+                (physicalX - minimumX) / rasterSpacing + padding;
+            const double rasterY =
+                (physicalY - minimumY) / rasterSpacing + padding;
+            const int x0 = static_cast<int>(std::floor(rasterX));
+            const int y0 = static_cast<int>(std::floor(rasterY));
+            const double fractionX = rasterX - x0;
+            const double fractionY = rasterY - y0;
+            const int sourceX = orientationA ? radial : centerX;
+            const int sourceY = orientationA ? centerY : radial;
+            const double ctValue =
+                m_ctImage->GetScalarComponentAsDouble(
+                    sourceX, sourceY, z, 0);
+            const bool maskValue =
                 m_maskImage->GetScalarComponentAsDouble(
-                    x, centerY, z, 0) > 0.5;
-            if (useMip) {
-                for (int y = 0; y < dimensions[1]; ++y) {
-                    ctValue = std::max(
-                        ctValue,
-                        m_ctImage->GetScalarComponentAsDouble(x, y, z, 0));
-                    maskValue = maskValue
-                        || m_maskImage->GetScalarComponentAsDouble(
-                               x, y, z, 0) > 0.5;
+                    sourceX, sourceY, z, 0) > 0.5;
+            for (int dy = 0; dy <= 1; ++dy) {
+                for (int dx = 0; dx <= 1; ++dx) {
+                    const int x = x0 + dx;
+                    const int y = y0 + dy;
+                    if (x < 0 || y < 0
+                        || x >= outputWidth || y >= outputHeight) {
+                        continue;
+                    }
+                    const double weight =
+                        (dx == 0 ? 1.0 - fractionX : fractionX)
+                        * (dy == 0 ? 1.0 - fractionY : fractionY);
+                    const size_t target =
+                        static_cast<size_t>(y * outputWidth + x);
+                    accumulatedCt[target] += weight * ctValue;
+                    accumulatedWeight[target] += weight;
+                    if (maskValue && weight > 0.0) {
+                        mask[target] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    QImage output(
+        outputWidth, outputHeight, QImage::Format_ARGB32);
+    const bool overlay = m_maskOverlayCheckBox->isChecked();
+    for (int y = 0; y < outputHeight; ++y) {
+        for (int x = 0; x < outputWidth; ++x) {
+            const size_t index =
+                static_cast<size_t>(y * outputWidth + x);
+            const double ctValue = accumulatedWeight[index] > 1.0e-8
+                ? accumulatedCt[index] / accumulatedWeight[index]
+                : -1024.0;
+            bool outline = false;
+            if (overlay && mask[index]) {
+                for (const std::array<int, 2> &offset :
+                     {std::array<int, 2>{-1, 0},
+                      std::array<int, 2>{1, 0},
+                      std::array<int, 2>{0, -1},
+                      std::array<int, 2>{0, 1}}) {
+                    const int neighborX = x + offset[0];
+                    const int neighborY = y + offset[1];
+                    if (neighborX < 0 || neighborY < 0
+                        || neighborX >= outputWidth
+                        || neighborY >= outputHeight
+                        || !mask[static_cast<size_t>(
+                            neighborY * outputWidth + neighborX)]) {
+                        outline = true;
+                        break;
+                    }
                 }
             }
             output.setPixel(
-                x, dimensions[2] - z - 1,
-                displayPixel(ctValue, overlay && maskValue));
+                x, outputHeight - y - 1,
+                displayPixel(ctValue, outline));
+        }
+    }
+    return output;
+}
+
+QImage StraightenedVesselWindow::renderStraightenedMpr(
+    bool xzOrientation,
+    bool thinSlabMip) const
+{
+    int dimensions[3] = {};
+    m_ctImage->GetDimensions(dimensions);
+    double spacing[3] = {};
+    m_ctImage->GetSpacing(spacing);
+    const int radialCount =
+        xzOrientation ? dimensions[0] : dimensions[1];
+    const int longitudinalCount = dimensions[2];
+    const int centerX = dimensions[0] / 2;
+    const int centerY = dimensions[1] / 2;
+    const int slabRadius = thinSlabMip
+        ? std::max(
+            0,
+            static_cast<int>(std::lround(
+                0.5 * m_slabThicknessSpinBox->value()
+                / spacing[1])))
+        : 0;
+    std::vector<double> ctValues(
+        static_cast<size_t>(radialCount * longitudinalCount),
+        -1024.0);
+    std::vector<unsigned char> maskValues(
+        static_cast<size_t>(radialCount * longitudinalCount), 0);
+    for (int z = 0; z < longitudinalCount; ++z) {
+        for (int radial = 0; radial < radialCount; ++radial) {
+            double ctValue = -std::numeric_limits<double>::infinity();
+            bool maskValue = false;
+            const int firstSlab = thinSlabMip ? -slabRadius : 0;
+            const int lastSlab = thinSlabMip ? slabRadius : 0;
+            for (int slab = firstSlab; slab <= lastSlab; ++slab) {
+                int sourceX = xzOrientation ? radial : centerX;
+                int sourceY = xzOrientation ? centerY + slab : radial;
+                if (!xzOrientation && thinSlabMip) {
+                    sourceX = centerX + slab;
+                }
+                if (sourceX < 0 || sourceY < 0
+                    || sourceX >= dimensions[0]
+                    || sourceY >= dimensions[1]) {
+                    continue;
+                }
+                ctValue = std::max(
+                    ctValue,
+                    m_ctImage->GetScalarComponentAsDouble(
+                        sourceX, sourceY, z, 0));
+                maskValue = maskValue
+                    || m_maskImage->GetScalarComponentAsDouble(
+                           sourceX, sourceY, z, 0) > 0.5;
+            }
+            const size_t target =
+                static_cast<size_t>(z * radialCount + radial);
+            ctValues[target] = std::isfinite(ctValue)
+                ? ctValue : -1024.0;
+            maskValues[target] = maskValue ? 1 : 0;
+        }
+    }
+    QImage output(
+        radialCount, longitudinalCount, QImage::Format_ARGB32);
+    const bool overlay = m_maskOverlayCheckBox->isChecked();
+    for (int z = 0; z < longitudinalCount; ++z) {
+        for (int radial = 0; radial < radialCount; ++radial) {
+            const size_t index =
+                static_cast<size_t>(z * radialCount + radial);
+            bool outline = false;
+            if (overlay && maskValues[index]) {
+                for (const std::array<int, 2> &offset :
+                     {std::array<int, 2>{-1, 0},
+                      std::array<int, 2>{1, 0},
+                      std::array<int, 2>{0, -1},
+                      std::array<int, 2>{0, 1}}) {
+                    const int neighborRadial = radial + offset[0];
+                    const int neighborZ = z + offset[1];
+                    if (neighborRadial < 0 || neighborZ < 0
+                        || neighborRadial >= radialCount
+                        || neighborZ >= longitudinalCount
+                        || !maskValues[static_cast<size_t>(
+                            neighborZ * radialCount + neighborRadial)]) {
+                        outline = true;
+                        break;
+                    }
+                }
+            }
+            output.setPixel(
+                radial, longitudinalCount - z - 1,
+                displayPixel(ctValues[index], outline));
         }
     }
     return output;
@@ -338,6 +770,13 @@ QImage StraightenedVesselWindow::renderCrossSection(int slice) const
                 displayPixel(ctValue, maskValue));
         }
     }
+    QPainter painter(&output);
+    painter.setPen(QPen(QColor(0, 220, 255), 1));
+    const int centerX = dimensions[0] / 2;
+    const int centerY = dimensions[1] / 2;
+    const int displayY = dimensions[1] - centerY - 1;
+    painter.drawLine(centerX - 5, displayY, centerX + 5, displayY);
+    painter.drawLine(centerX, displayY - 5, centerX, displayY + 5);
     return output;
 }
 

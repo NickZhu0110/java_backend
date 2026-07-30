@@ -24,6 +24,8 @@ public class AnalysisJob {
 
     private String outputPath;
 
+    private String outputName;
+
     private LocalDateTime startedAt;
 
     private LocalDateTime finishedAt;

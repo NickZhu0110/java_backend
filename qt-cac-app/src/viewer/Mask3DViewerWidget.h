@@ -80,6 +80,13 @@ public:
     void setMultiStructureOpacity(int labelValue, double opacity);
     void setNiftiCenterline(
         const std::vector<std::array<double, 3>> &pointsLpsMm);
+    bool setNiftiCenterlineCandidates(
+        const std::vector<std::vector<std::array<double, 3>>> &pathsLpsMm,
+        int selectedIndex,
+        bool showAllCandidates);
+    bool selectNiftiCenterlineCandidate(int selectedIndex);
+    void setAllNiftiCenterlineCandidatesVisible(bool visible);
+    bool hasSelectedNiftiCenterlineCandidate() const;
     void setNiftiCenterlineVisible(bool visible);
     void clearNiftiCenterline();
     const vtkImageData *activeNiftiCtImage() const;
@@ -137,6 +144,8 @@ private:
     void updateMultiStructureBoundsGuide();
     void clearMultiStructureBoundsGuide();
     void clearVolumeGeometry();
+    void clearNiftiSelectedCenterline();
+    bool rebuildNiftiSelectedCenterline();
     void createPositionPlaneActors();
     bool setNiftiReviewVolumeGeometry(const NiftiVolumeGeometry &geometry,
                                       QString *errorMessage);
@@ -168,6 +177,10 @@ private:
     vtkSmartPointer<vtkPolyDataMapper> m_niftiCenterlineMapper;
     vtkSmartPointer<vtkActor> m_niftiCenterlineActor;
     std::vector<vtkSmartPointer<vtkActor>> m_niftiCenterlineEndpointActors;
+    std::vector<vtkSmartPointer<vtkActor>> m_niftiCandidateCenterlineActors;
+    std::vector<std::vector<std::array<double, 3>>> m_niftiCandidatePathsLpsMm;
+    int m_selectedNiftiCandidateIndex = -1;
+    bool m_showAllNiftiCandidates = true;
     MultiStructureVolume m_multiStructureVolume;
     std::vector<MultiStructureSurface> m_multiStructureSurfaces;
     std::array<vtkSmartPointer<vtkPlaneSource>, 3> m_positionPlaneSources;

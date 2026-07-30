@@ -1,6 +1,7 @@
 package com.cac.backend.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.Data;
 
 @Data
@@ -13,6 +14,10 @@ public class CreateJobRequest {
     private String inputPath;
 
     private String outputPath;
+
+    @NotBlank
+    @Size(max = 100)
+    private String outputName;
 
     private String fileType = "dcm";
 

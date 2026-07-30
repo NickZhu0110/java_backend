@@ -78,13 +78,23 @@ bool PythonSimpleItkPreprocessor::runPreprocessor(const QString &caseCacheDir,
         arguments << QStringLiteral("--mask") << maskPath;
     }
 
-    const QString pythonExecutable =
+    QString pythonExecutable =
         qEnvironmentVariable("CAC_PYTHON_EXECUTABLE").trimmed();
+    if (pythonExecutable.isEmpty()) {
+        const QString localApplicationData =
+            qEnvironmentVariable("LOCALAPPDATA").trimmed();
+        if (!localApplicationData.isEmpty()) {
+            pythonExecutable = QDir(localApplicationData).filePath(
+                QStringLiteral("CAC/python310/python.exe"));
+        }
+    }
     if (pythonExecutable.isEmpty() || !QFileInfo(pythonExecutable).isAbsolute()
         || !QFileInfo::exists(pythonExecutable)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral(
-                "CAC_PYTHON_EXECUTABLE must reference the controlled absolute python.exe.");
+                "CAC_PYTHON_EXECUTABLE must reference the controlled absolute "
+                "python.exe. Resolved path: %1")
+                                .arg(pythonExecutable);
         }
         return false;
     }

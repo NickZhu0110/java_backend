@@ -136,8 +136,20 @@ void MainWindow::setupInitialState()
     ui->fileTypeComboBox->setCurrentText(QStringLiteral("dcm"));
 
     ui->deviceComboBox->clear();
-    ui->deviceComboBox->addItem(QStringLiteral("CPU"), QStringLiteral("cpu"));
-    ui->deviceComboBox->addItem(QStringLiteral("CUDA GPU"), QStringLiteral("cuda"));
+    const bool cpuOnlyRelease =
+        qEnvironmentVariableIntValue("CAC_CPU_ONLY_RELEASE") == 1;
+    ui->deviceComboBox->addItem(
+        cpuOnlyRelease
+            ? QStringLiteral("CPU (portable build)")
+            : QStringLiteral("CPU"),
+        QStringLiteral("cpu"));
+    if (!cpuOnlyRelease) {
+        ui->deviceComboBox->addItem(
+            QStringLiteral("CUDA GPU"), QStringLiteral("cuda"));
+    } else {
+        ui->deviceComboBox->setToolTip(
+            QStringLiteral("This portable release supports CPU inference only."));
+    }
     ui->deviceComboBox->setCurrentIndex(0);
 
     ui->enableAdvancedOverridesCheckBox->setChecked(false);

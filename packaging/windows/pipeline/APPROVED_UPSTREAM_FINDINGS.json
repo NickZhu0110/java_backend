@@ -1,0 +1,343 @@
+{
+  "schemaVersion": 1,
+  "applicationVersion": "v0.6.10 win heart process",
+  "frozenCommit": "bab1caf4adeeb1481b2fab5125150f00ce502974",
+  "entries": [
+    {
+      "path": "inference\\segment-cacs\\src\\segment_cacs_predict.py",
+      "rule": "unix-root-path",
+      "sha256": "a3e5e4051c6a38c581587b88d066f88870af4fa1c8f486700a945898dd07af63",
+      "reason": "Frozen upstream CLI defaults; the portable local CLI supplies explicit package model, input, and output paths."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\fsspec\\utils.py",
+      "rule": "unix-root-path",
+      "sha256": "136e238b45cb582ea7ddbc36b07036f0e631ac653d5b2fda9765f276c460ad19",
+      "reason": "Audited upstream platform helper, test, documentation, or metadata; not invoked as a CAC package path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\numpy\\__config__.py",
+      "rule": "absolute-user-profile",
+      "sha256": "fb3c6847ddce068cb533edf1ff5622e284a9b7f3e14c09d52f97ce0fab179c3c",
+      "reason": "Audited upstream build metadata or documentation example; contains no packaging-user path and is not used for runtime path resolution."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\numpy-1.26.3.dist-info\\DELVEWHEEL",
+      "rule": "absolute-user-profile",
+      "sha256": "242091448e7c0e550c61d60416689841b2f84b1394bcd17421b4ef566167a329",
+      "reason": "Audited upstream build metadata or documentation example; contains no packaging-user path and is not used for runtime path resolution."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\pip\\_internal\\utils\\urls.py",
+      "rule": "absolute-user-profile",
+      "sha256": "685fde83dba5e5df1b302c5f4924b141c7ecf8ea4975b4ad62a647a32d8ad511",
+      "reason": "Audited upstream documentation example; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\pip\\_vendor\\platformdirs\\android.py",
+      "rule": "unix-root-path",
+      "sha256": "af40ec85505ff913b58d72465fc0b84e297b1755d6b7e6e47563209af1226988",
+      "reason": "Audited Android platform helper; not invoked on Windows."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\pip\\_vendor\\rich\\logging.py",
+      "rule": "legacy-backend-url",
+      "sha256": "e4a68f3d230ff45c5c5cf05c28ce1c19dff35bbf0f3207fe61b3159ef7d2c34a",
+      "reason": "Audited upstream documentation example; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\pip\\_vendor\\urllib3\\exceptions.py",
+      "rule": "legacy-backend-url",
+      "sha256": "79e43bee726317dedb3fa4af08ae209b1e81a5064a53cca3bccf80203c19757f",
+      "reason": "Audited upstream documentation example; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\scipy\\__config__.py",
+      "rule": "absolute-user-profile",
+      "sha256": "f6c76cd0bd68eae943b3fbc55b8db1cd3a4542f976fe759eac3383e5f1a01e0e",
+      "reason": "Audited upstream wheel build metadata; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\scipy\\datasets\\__init__.py",
+      "rule": "absolute-user-profile",
+      "sha256": "b2ae63ecba3dd0c74c5e040fb969ec726e66eb684b3da6e067e9fa4a71a398f5",
+      "reason": "Audited upstream documentation placeholder; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\scipy-1.11.4.dist-info\\DELVEWHEEL",
+      "rule": "absolute-user-profile",
+      "sha256": "c1489cca6df6043ad931a46dbc7c0c1b2d3deada2c48be280dd03e4b47f88164",
+      "reason": "Audited upstream wheel build metadata; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\_distutils\\tests\\test_util.py",
+      "rule": "unix-root-path",
+      "sha256": "a240806a1a20e2afec3226fd195d3bce71b09363c3fe053f99fb2b173b1d0b0e",
+      "reason": "Audited upstream test source; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\_vendor\\autocommand-2.2.2.dist-info\\METADATA",
+      "rule": "legacy-backend-url",
+      "sha256": "3800d9b91dceea2065a6ed6279383362e97ac38b8e56b9343f404ee531860099",
+      "reason": "Audited upstream package documentation; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs\\android.py",
+      "rule": "unix-root-path",
+      "sha256": "af40ec85505ff913b58d72465fc0b84e297b1755d6b7e6e47563209af1226988",
+      "reason": "Audited Android platform helper; not invoked on Windows."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs-4.4.0.dist-info\\METADATA",
+      "rule": "absolute-user-profile",
+      "sha256": "bbc5216d5f4c77bfbc57227264d52e66bccde71ccf79e75e1a6046d029d30223",
+      "reason": "Audited upstream package documentation; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs-4.4.0.dist-info\\METADATA",
+      "rule": "unix-root-path",
+      "sha256": "bbc5216d5f4c77bfbc57227264d52e66bccde71ccf79e75e1a6046d029d30223",
+      "reason": "Audited upstream platform documentation; not invoked as a CAC package path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\setuptools\\launcher manifest.xml",
+      "rule": "unapproved-xml",
+      "sha256": "c652db8d6ac1d35b4a0b4fa195590e2a48923dbccc9a5d9e38fb49fee7029db1",
+      "reason": "Reviewed setuptools launcher resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\SimpleITK\\SimpleITK.py",
+      "rule": "absolute-user-profile",
+      "sha256": "186768d015ca5dd4b908bb90eca46dfc524d1cf0e34080d79b9914167feac6a8",
+      "reason": "Audited upstream API documentation example; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\skimage\\data\\lbpcascade_frontalface_opencv.xml",
+      "rule": "unapproved-xml",
+      "sha256": "03097789a3dcbb0e40d20b9ef82537dbc3b670b6a7f2268d735470f22e003a91",
+      "reason": "Reviewed scikit-image runtime resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-cac\\Lib\\site-packages\\torch\\_appdirs.py",
+      "rule": "absolute-user-profile",
+      "sha256": "d9ee287780ac5599095361453ac30105e122ccf7dd06cb2516cfdacddeff59b2",
+      "reason": "Audited upstream documentation placeholder; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\distutils\\tests\\test_util.py",
+      "rule": "unix-root-path",
+      "sha256": "9a795b1ede038ac9c2ab16e1f852c17bd5c00e29d22c0c9e2d02ce8224fb74f9",
+      "reason": "Audited standard-library test source; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\ipaddress.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "33ec10de362bf0d925be1d38e23343a2dd82e19813ca27ee631c31a401a060b5",
+      "reason": "Audited standard-library IP constants; the CAC backend binds to 127.0.0.1."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\aiohttp\\web_request.py",
+      "rule": "legacy-backend-url",
+      "sha256": "44c1ef497e5531774f73618dcb399fc181b2433f363cbd79785c1694fb2d815b",
+      "reason": "Audited upstream documentation example; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\aiohttp\\web_runner.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "3c651d66cfdddaacccdd39dbeb2090428c5fc2a41916e56bfcd18824166af4cb",
+      "reason": "Audited optional upstream server helper; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\future\\backports\\socket.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "0c7d55e888ca3e9274b659fc6d8bf1bd0eea9ef646f94a10b4c039c9595e1e25",
+      "reason": "Audited upstream socket constant; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\future\\backports\\test\\support.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "a13434f50acb71b98565784c1aa3f3dd5ad865d760c692461093d08707e21b69",
+      "reason": "Audited upstream test helper; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\pip\\_internal\\utils\\urls.py",
+      "rule": "absolute-user-profile",
+      "sha256": "685fde83dba5e5df1b302c5f4924b141c7ecf8ea4975b4ad62a647a32d8ad511",
+      "reason": "Audited upstream documentation example; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\pip\\_vendor\\platformdirs\\android.py",
+      "rule": "unix-root-path",
+      "sha256": "af40ec85505ff913b58d72465fc0b84e297b1755d6b7e6e47563209af1226988",
+      "reason": "Audited Android platform helper; not invoked on Windows."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\pip\\_vendor\\rich\\logging.py",
+      "rule": "legacy-backend-url",
+      "sha256": "e4a68f3d230ff45c5c5cf05c28ce1c19dff35bbf0f3207fe61b3159ef7d2c34a",
+      "reason": "Audited upstream documentation example; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\pip\\_vendor\\urllib3\\exceptions.py",
+      "rule": "legacy-backend-url",
+      "sha256": "79e43bee726317dedb3fa4af08ae209b1e81a5064a53cca3bccf80203c19757f",
+      "reason": "Audited upstream documentation example; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\scipy\\datasets\\__init__.py",
+      "rule": "absolute-user-profile",
+      "sha256": "5fff406de7cf2b5fe983e786ee0de79fef898681de0ecac415b25f6c8e47c9a9",
+      "reason": "Audited upstream documentation placeholder; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\_distutils\\tests\\test_util.py",
+      "rule": "unix-root-path",
+      "sha256": "a240806a1a20e2afec3226fd195d3bce71b09363c3fe053f99fb2b173b1d0b0e",
+      "reason": "Audited upstream test source; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\_vendor\\autocommand-2.2.2.dist-info\\METADATA",
+      "rule": "legacy-backend-url",
+      "sha256": "3800d9b91dceea2065a6ed6279383362e97ac38b8e56b9343f404ee531860099",
+      "reason": "Audited upstream package documentation; not the CAC backend endpoint."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs\\android.py",
+      "rule": "unix-root-path",
+      "sha256": "af40ec85505ff913b58d72465fc0b84e297b1755d6b7e6e47563209af1226988",
+      "reason": "Audited Android platform helper; not invoked on Windows."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs-4.4.0.dist-info\\METADATA",
+      "rule": "absolute-user-profile",
+      "sha256": "bbc5216d5f4c77bfbc57227264d52e66bccde71ccf79e75e1a6046d029d30223",
+      "reason": "Audited upstream package documentation; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\_vendor\\platformdirs-4.4.0.dist-info\\METADATA",
+      "rule": "unix-root-path",
+      "sha256": "bbc5216d5f4c77bfbc57227264d52e66bccde71ccf79e75e1a6046d029d30223",
+      "reason": "Audited upstream platform documentation; not invoked as a CAC package path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\setuptools\\launcher manifest.xml",
+      "rule": "unapproved-xml",
+      "sha256": "c652db8d6ac1d35b4a0b4fa195590e2a48923dbccc9a5d9e38fb49fee7029db1",
+      "reason": "Reviewed setuptools launcher resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\SimpleITK\\SimpleITK.py",
+      "rule": "absolute-user-profile",
+      "sha256": "66722c48ca8d25442ddc5ea51ed74858678d5ab1014f548ae1186edde929153a",
+      "reason": "Audited upstream API documentation example; contains no packaging-user path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\vmtk\\share\\vmtkimagevolumeviewerpresets.xml",
+      "rule": "unapproved-xml",
+      "sha256": "cb1d82eea08ddcb7eb95d2e7f9e9009ae52df559ac5e90f81a2e75d52eeac91b",
+      "reason": "Reviewed VMTK viewer preset resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\wslink\\backends\\aiohttp\\relay.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "6e8c0a7d3e2848c246138f270fea621c06d33465851c70e4b41e83583d46a34d",
+      "reason": "Audited optional upstream relay helper; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\site-packages\\wslink\\server.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "254e94fba508b7121cb5a9613842869a060a8b373c10f89290d2b8947dc5d32d",
+      "reason": "Audited optional upstream server helper; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\socket.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "da91da22139668d19c6d289e512c3bf84fc53906d442df92977f3d614e3ac77c",
+      "reason": "Audited standard-library socket constant; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\test\\support\\socket_helper.py",
+      "rule": "wildcard-bind-address",
+      "sha256": "8e60a6e35d6aaa03731b97b8f3af8977beb0d568ce41a057f9abc42e171264b7",
+      "reason": "Audited standard-library test helper; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Lib\\venv\\scripts\\common\\Activate.ps1",
+      "rule": "absolute-user-profile",
+      "sha256": "3795a060dea7d621320d6d841deb37591fadf7f5592c5cb2286f9867af0e91df",
+      "reason": "Audited standard-library example path; the portable package does not use venv activation."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\lib\\cmake\\vtk-9.2\\vtkModuleTesting.cmake",
+      "rule": "unix-root-path",
+      "sha256": "ec4f30a7c1c14e533f9474821da847a713c19c1490f0c4b92a92a88789c406a4",
+      "reason": "Audited upstream build/test metadata; not invoked by CAC."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\mkspecs\\devices\\linux-sh4-stmicro-ST7540-g++\\qmake.conf",
+      "rule": "unix-root-path",
+      "sha256": "f2ae867e42d706bb36cfe52c69f907757f739ec5263c612ecfb6758899d9a060",
+      "reason": "Audited non-Windows Qt device specification; not invoked on Windows."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\doc\\libssh2\\NEWS",
+      "rule": "unix-root-path",
+      "sha256": "334d5208024793131fb980a2c0bff33d3cbd3b3a9bf46b24f81df4751a3e00c6",
+      "reason": "Audited upstream release notes; not invoked as a CAC package path."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\doc\\libssh2\\NEWS",
+      "rule": "wildcard-bind-address",
+      "sha256": "334d5208024793131fb980a2c0bff33d3cbd3b3a9bf46b24f81df4751a3e00c6",
+      "reason": "Audited upstream release notes; not used to bind the CAC backend."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\cp699.xml",
+      "rule": "unapproved-xml",
+      "sha256": "ca945f8c58d532b1d488cd16d3373d322b3ed3575e74343fdcb802d373e696ed",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\CSAHeader.xml",
+      "rule": "unapproved-xml",
+      "sha256": "e200993e931626a1c08482baebab8a2391dc34158b5743714403e245198623e1",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\Part3.xml",
+      "rule": "unapproved-xml",
+      "sha256": "10cd0b5a07a144e63339fd1d05acf5358f11ab505d2133120b4e1295a7890445",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\Part4.xml",
+      "rule": "unapproved-xml",
+      "sha256": "7fdfec20a0555b5da11547ea2a7ae11cac25fa2a5a77b5bb054758e3c8b451c3",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\Part6.xml",
+      "rule": "unapproved-xml",
+      "sha256": "d1f6310840eb4f0397ec4149de4c7102f9cca7e3084f33cee9facf0354cc5cd9",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\Part7a.xml",
+      "rule": "unapproved-xml",
+      "sha256": "8a7a3da82d6f8aaed8c6f392ed63ae1f7e1468ea17345ac06d228c87acf3c804",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\Part7b.xml",
+      "rule": "unapproved-xml",
+      "sha256": "72b6bf74f351ef66cca1f7c80d6f4624b82d6bbb902efa2e0126e855c4a327ba",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    },
+    {
+      "path": "runtime\\python-vmtk\\Library\\share\\ITK-5.3\\gdcm\\XML\\UIDs.xml",
+      "rule": "unapproved-xml",
+      "sha256": "7dffc9218161d45bbcc6ea2c3f1a0ad5f61143172ec1a1770337bdef93d3ce59",
+      "reason": "Reviewed GDCM dictionary resource; not patient or medical-input XML."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+SEGMENT-CACS CHECKPOINT REDISTRIBUTION WARNING
+==============================================
+
+The packaging process can record the checkpoint filename and SHA-256 digest,
+but it cannot establish or grant redistribution rights for the trained model
+weights.
+
+Do not publish or transfer a package containing the SEGMENT-CACS checkpoint
+outside the organization until the model owner has supplied written
+redistribution authorization and any required attribution or usage terms.
+
+The SEGMENT-CACS source-code license does not, by itself, prove that the
+checkpoint weights may be redistributed under the same terms.
